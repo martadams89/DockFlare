@@ -27,7 +27,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Clean up the downloaded .deb file
     && rm cloudflared-linux-amd64.deb \
     # Verify cloudflared installation (optional but good practice)
-    && cloudflared --version
+    && cloudflared --version \
+    # Create the default cloudflared directory to avoid path errors
+    # This directory is expected by cloudflared even if cert.pem isn't used for API commands
+    && mkdir -p /root/.cloudflared \
+    && echo "Created /root/.cloudflared directory" # Optional: confirmation log
 
 # Install Python dependencies
 # Copy requirements file first to leverage Docker cache
