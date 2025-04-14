@@ -1,37 +1,22 @@
 version: '3.8'
-
 services:
   cloudflare-tunnel-manager:
-    # --- Build from local Dockerfile ---
     build: .
-    container_name: cloudflare-tunnel-manager # Optional: Fixed name for the manager itself
+    container_name: cloudflare-tunnel-manager
     restart: unless-stopped
-    # --- Port Mapping ---
-    ports: # <-- CORRECTED: Must be lowercase 'ports'
-      - "5000:5000" # Format is "HOST_PORT:CONTAINER_PORT"
-    # --- Environment Variables ---
+    ports:
+      - "5000:5000"
     env_file:
-      - .env # Load variables from .env file (CF_API_TOKEN, TUNNEL_NAME, etc.)
-    # --- Volumes ---
+      - .env
     volumes:
-      # Mount Docker socket to allow interaction with Docker daemon
-      - /var/run/docker.sock:/var/run/docker.sock:ro # Read-only recommended if possible
-      # Mount a directory to persist the state file
-      # Create './data' directory locally first or adjust path
-      - ./data:/app/data # Mount a local ./data dir to /app/data in the container
-    # --- Networking ---
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data:/app/data
     networks:
-      - cloudflare-net # Connect the manager to the dedicated network
-    # --- Important: Specify where the state file should be stored within the container ---
-    # Make sure STATE_FILE_PATH in .env (or default in app.py) matches the persistent volume mount
+      - cloudflare-net
     environment:
-      - STATE_FILE_PATH=/app/data/state.json # Example path inside the mounted volume
+      - STATE_FILE_PATH=/app/data/state.json
 
 networks:
-  # --- Define the network cloudflared and target services will use ---
   cloudflare-net:
-    driver: bridge # Use standard bridge driver
-    name: cloudflare-net # Explicitly name the network
-    # Let Compose manage this network (create if not exists)
-    # If you need to use a pre-existing network, add:
-    # external: true
+    driver: bridge
+    name: cloudflare-net
