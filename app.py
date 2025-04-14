@@ -1723,9 +1723,10 @@ def update_cloudflared_container_status():
         except Exception as e:
              logging.error(f"Unexpected error reloading agent container status: {e}", exc_info=True)
              cloudflared_agent_state["container_status"] = "unknown" # Mark as unknown due to error
-    # else: # container is None
+     else: 
+         # container is None
          # get_cloudflared_container already updated the status (not_found or docker_unavailable)
-         # logging.debug("Agent container not found or Docker unavailable.")
+         logging.debug("Agent container not found or Docker unavailable.")
          pass
 
 def ensure_docker_network_exists(network_name):
