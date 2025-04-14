@@ -31,7 +31,7 @@ CF_HEADERS = {
 LABEL_PREFIX = os.getenv('LABEL_PREFIX', 'cloudflare.tunnel')
 GRACE_PERIOD_SECONDS = int(os.getenv('GRACE_PERIOD_SECONDS', 28800)) # 8 hours default
 CLEANUP_INTERVAL_SECONDS = int(os.getenv('CLEANUP_INTERVAL_SECONDS', 300)) # 5 mins default
-STATE_FILE_PATH = os.getenv('STATE_FILE_PATH', '/app/state.json') # Ensure this path is writable inside the container
+STATE_FILE_PATH = os.getenv('STATE_FILE_PATH', '/app/data/state.json') # Default path inside volume
 
 # Cloudflared Agent Config
 CLOUDFLARED_CONTAINER_NAME = os.getenv('CLOUDFLARED_CONTAINER_NAME', f"cloudflared-agent-{TUNNEL_NAME}")
@@ -46,8 +46,9 @@ if not CF_API_TOKEN or not TUNNEL_NAME or not CF_ACCOUNT_ID:
 
 # --- Docker Client ---
 try:
-    docker_client = docker.from_env()
-    docker_client.ping()
+    # Use timeout settings for the Docker client
+    docker_client = docker.from_env(timeout=10) # 10 second timeout for operations
+    docker_client.ping() # Verify connection
     logging.info("Successfully connected to Docker daemon.")
 except Exception as e:
     logging.error(f"FATAL: Failed to connect to Docker daemon: {e}")
@@ -63,6 +64,18 @@ stop_event = threading.Event()
 # --- State Persistence ---
 def load_state():
     global managed_rules
+    # Ensure the directory for the state file exists
+    state_dir = os.path.dirname(STATE_FILE_PATH)
+    if not os.path.exists(state_dir):
+        try:
+             os.makedirs(state_dir, exist_ok=True)
+             logging.info(f"Created directory for state file: {state_dir}")
+        except OSError as e:
+             logging.error(f"FATAL: Could not create directory for state file {state_dir}: {e}. State persistence will fail.")
+             # Depending on requirements, might want to sys.exit(1) here
+             managed_rules = {}
+             return
+
     if not os.path.exists(STATE_FILE_PATH):
         logging.info(f"State file '{STATE_FILE_PATH}' not found, starting fresh.")
         managed_rules = {}
@@ -74,15 +87,17 @@ def load_state():
         for hostname, rule in loaded_data.items():
              if rule.get("delete_at") and isinstance(rule.get("delete_at"), str):
                  try:
-                     # Try parsing with timezone, fallback to naive then localize
-                     rule["delete_at"] = datetime.fromisoformat(rule["delete_at"])
-                 except ValueError:
-                     try:
-                        naive_dt = datetime.fromisoformat(rule["delete_at"].replace('Z', '+00:00'))
-                        rule["delete_at"] = naive_dt.replace(tzinfo=timezone.utc) if naive_dt.tzinfo is None else naive_dt
-                     except Exception as date_err:
-                         logging.warning(f"Could not parse delete_at for {hostname}: {rule['delete_at']} Error: {date_err}. Setting to None.")
-                         rule["delete_at"] = None
+                     # Try parsing ISO format with Z (UTC) - most common from save_state
+                     if rule["delete_at"].endswith('Z'):
+                        rule["delete_at"] = datetime.fromisoformat(rule["delete_at"].replace('Z', '+00:00'))
+                     else:
+                         # Fallback for formats without Z, assume UTC if naive
+                         dt = datetime.fromisoformat(rule["delete_at"])
+                         rule["delete_at"] = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+                 except ValueError as date_err:
+                     logging.warning(f"Could not parse delete_at for {hostname}: {rule['delete_at']} Error: {date_err}. Setting to None.")
+                     rule["delete_at"] = None
              elif not isinstance(rule.get("delete_at"), datetime):
                  rule["delete_at"] = None # Ensure it's either datetime or None
 
@@ -101,10 +116,17 @@ def save_state():
         # Ensure delete_at is ISO formatted string with UTC timezone ('Z')
         if rule_copy.get("delete_at") and isinstance(rule_copy["delete_at"], datetime):
             dt_utc = rule_copy["delete_at"].astimezone(timezone.utc)
-            rule_copy["delete_at"] = dt_utc.strftime('%Y-%m-%dT%H:%M:%S.%fZ') # More compatible ISO format
+            # Use format with 'Z' for UTC indication
+            rule_copy["delete_at"] = dt_utc.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
         serializable_state[hostname] = rule_copy
 
     try:
+        # Ensure the directory exists before writing
+        state_dir = os.path.dirname(STATE_FILE_PATH)
+        if not os.path.exists(state_dir):
+            try: os.makedirs(state_dir, exist_ok=True); logging.info(f"Created directory {state_dir} before saving state.")
+            except OSError as e: logging.error(f"Could not create directory {state_dir} for state file: {e}. Save failed."); return
+
         temp_file_path = STATE_FILE_PATH + ".tmp"
         with open(temp_file_path, 'w') as f:
             json.dump(serializable_state, f, indent=2)
@@ -125,38 +147,61 @@ def cf_api_request(method, endpoint, json_data=None, params=None):
 
         # Handle potential empty success responses (e.g., PUT, DELETE)
         if response.status_code == 204 or not response.content:
-            return {"success": True} # Simulate success structure
+            return {"success": True, "result": None} # Simulate success structure with null result
 
         # Try to parse JSON, handle potential errors
         try:
             response_data = response.json()
-            logging.debug(f"API Response Body: {response_data}")
-            return response_data
+            logging.debug(f"API Response Body (first 500 chars): {str(response_data)[:500]}")
+            # Basic check for Cloudflare's success structure
+            if isinstance(response_data, dict) and 'success' in response_data:
+                 if response_data['success']:
+                      return response_data
+                 else:
+                      # Extract errors if success is false
+                      cf_errors = response_data.get('errors', [])
+                      if cf_errors and isinstance(cf_errors, list) and len(cf_errors) > 0 and isinstance(cf_errors[0], dict):
+                           error_msg = f"API Error: {cf_errors[0].get('message', 'Unknown error')}"
+                           logging.error(f"API Request Failed ({method} {url}): {error_msg} - Full Errors: {cf_errors}")
+                      else:
+                           error_msg = f"API reported failure but no error details provided. Response: {response_data}"
+                           logging.error(f"API Request Failed ({method} {url}): {error_msg}")
+                      raise requests.exceptions.RequestException(error_msg, response=response) # Treat CF error as exception
+            else:
+                 # Response is JSON but not the expected format
+                 logging.warning(f"API response for {method} {url} was valid JSON but missing 'success' field. Status: {response.status_code}. Body: {str(response_data)[:200]}")
+                 # Decide how to handle this - maybe treat as success if 2xx? For now, raise.
+                 raise requests.exceptions.RequestException(f"Unexpected JSON response format from API. Status: {response.status_code}", response=response)
+
+
         except json.JSONDecodeError:
             logging.error(f"API response for {method} {url} was not valid JSON. Status: {response.status_code}. Body: {response.text[:200]}")
             raise requests.exceptions.RequestException(f"Invalid JSON response from API. Status: {response.status_code}", response=response)
 
     except requests.exceptions.RequestException as e:
-        logging.error(f"API Request Failed: {method} {url}")
-        error_msg = f"Request Exception: {e}"
-        # Try to get more specific error from response body if available
-        if e.response is not None:
-            logging.error(f"Status Code: {e.response.status_code}")
-            try:
-                error_data = e.response.json()
-                logging.error(f"Response Body: {error_data}")
-                cf_errors = error_data.get('errors', [])
-                if cf_errors and isinstance(cf_errors, list) and len(cf_errors) > 0 and isinstance(cf_errors[0], dict):
-                    error_msg = f"API Error: {cf_errors[0].get('message', 'Unknown error')}"
-                else:
-                    error_msg = f"HTTP {e.response.status_code} - {e.response.text[:100]}"
-            except (ValueError, AttributeError): # Handle non-JSON error response
-                 error_msg = f"HTTP {e.response.status_code} - {e.response.text[:100]}"
-        else:
-            logging.error(f"Error details (no response received): {e}")
+        # Log details if not already logged from within the success=False block
+        if error_msg is None: # Only build message if not already set by success=False handler
+            logging.error(f"API Request Failed: {method} {url}")
+            error_msg = f"Request Exception: {e}"
+            # Try to get more specific error from response body if available
+            if e.response is not None:
+                # Already logged status code by raise_for_status if it's an HTTPError
+                # Try to get JSON error body
+                try:
+                    error_data = e.response.json()
+                    logging.error(f"Response Body: {error_data}")
+                    cf_errors = error_data.get('errors', [])
+                    if cf_errors and isinstance(cf_errors, list) and len(cf_errors) > 0 and isinstance(cf_errors[0], dict):
+                        error_msg = f"API Error: {cf_errors[0].get('message', 'Unknown error')}"
+                    else: # Non-standard JSON error or plain text
+                        error_msg = f"HTTP {e.response.status_code} - {e.response.text[:100]}"
+                except (ValueError, AttributeError, json.JSONDecodeError): # Handle non-JSON error response
+                     error_msg = f"HTTP {e.response.status_code} - {e.response.text[:100]}"
+            else:
+                logging.error(f"Error details (no response received): {e}")
 
         # Update global state only if it's a tunnel creation/lookup issue during initialization
-        if "cfd_tunnel" in endpoint and tunnel_state.get("id") is None:
+        if "cfd_tunnel" in endpoint and tunnel_state.get("id") is None and "token" not in endpoint: # Avoid overwriting token errors
              tunnel_state["error"] = error_msg
 
         raise requests.exceptions.RequestException(error_msg, response=e.response) # Re-raise with refined message
@@ -182,9 +227,13 @@ def find_tunnel_via_api(name):
         else:
             logging.info(f"Tunnel '{name}' not found via API.")
             return None, None
-    except Exception as e:
-        logging.error(f"Error finding tunnel '{name}' via API: {e}")
-        tunnel_state["error"] = f"Failed finding tunnel: {e}"
+    except requests.exceptions.RequestException as e: # Catch specific API errors from helper
+        logging.error(f"API error finding tunnel '{name}': {e}")
+        # tunnel_state["error"] should be set by cf_api_request
+        return None, None
+    except Exception as e: # Catch unexpected errors
+        logging.error(f"Unexpected error finding tunnel '{name}': {e}", exc_info=True)
+        tunnel_state["error"] = f"Unexpected error finding tunnel: {e}"
         return None, None
 
 def get_tunnel_token_via_api(tunnel_id):
@@ -206,14 +255,16 @@ def get_tunnel_token_via_api(tunnel_id):
         error_msg = f"API Error getting token for tunnel {tunnel_id}: {e}"
         if e.response is not None:
              error_msg += f" Status: {e.response.status_code} Body: {e.response.text[:100]}"
-        logging.error(error_msg, exc_info=True)
+        logging.error(error_msg) # Don't need full exc_info usually
         tunnel_state["error"] = error_msg # Update state if token fetch fails
-        raise # Re-raise the exception
+        raise # Re-raise the exception for initialize_tunnel to handle
+    except Exception as e: # Catch unexpected errors
+         logging.error(f"Unexpected error getting tunnel token for {tunnel_id}: {e}", exc_info=True)
+         tunnel_state["error"] = f"Unexpected error getting token: {e}"
+         raise
 
 def create_tunnel_via_api(name):
     endpoint = f"/accounts/{CF_ACCOUNT_ID}/cfd_tunnel"
-    # Send tunnel secret only on creation for security
-    # Generate a dummy secret, cloudflared will manage its own connector secret
     # config_src='cloudflare' is important for API management
     payload = {"name": name, "config_src": "cloudflare"}
     try:
@@ -227,9 +278,13 @@ def create_tunnel_via_api(name):
             raise ValueError("Missing ID or Token in API response for tunnel creation")
         logging.info(f"Successfully created tunnel '{name}' with ID {tunnel_id} via API.")
         return tunnel_id, token
-    except Exception as e:
-        logging.error(f"Error creating tunnel '{name}' via API: {e}")
-        tunnel_state["error"] = f"Failed creating tunnel: {e}"
+    except requests.exceptions.RequestException as e: # Catch specific API errors
+        logging.error(f"API error creating tunnel '{name}': {e}")
+        # tunnel_state["error"] should be set by cf_api_request
+        return None, None
+    except Exception as e: # Catch unexpected errors
+        logging.error(f"Unexpected error creating tunnel '{name}': {e}", exc_info=True)
+        tunnel_state["error"] = f"Unexpected error creating tunnel: {e}"
         return None, None
 
 def initialize_tunnel():
@@ -239,7 +294,7 @@ def initialize_tunnel():
     token = None
 
     try:
-        # Step 1: Try to find the tunnel
+        # Step 1: Try to find the tunnel (also gets token if found)
         tunnel_id, token = find_tunnel_via_api(TUNNEL_NAME)
 
         # Step 2: If not found, create it
@@ -247,24 +302,27 @@ def initialize_tunnel():
             tunnel_state["status_message"] = f"Tunnel '{TUNNEL_NAME}' not found. Creating via API..."
             tunnel_id, token = create_tunnel_via_api(TUNNEL_NAME)
 
-        # Step 3: If found but token fetch failed earlier, or creation failed, we won't have both
+        # Step 3: Check results
         if tunnel_id and token:
             tunnel_state["id"] = tunnel_id
             tunnel_state["token"] = token
             tunnel_state["status_message"] = "Tunnel setup complete (using API)."
-            tunnel_state["error"] = None # Clear any transient error from find/create steps if we ultimately succeed
+            tunnel_state["error"] = None # Clear any transient error if we ultimately succeed
+            logging.info(f"Tunnel '{TUNNEL_NAME}' initialized successfully. ID: {tunnel_id}, Token retrieved.")
         elif not tunnel_state.get("error"): # If no specific error was recorded, set a generic one
              tunnel_state["status_message"] = "Tunnel initialization failed."
              tunnel_state["error"] = "Failed to find/create tunnel or retrieve token. Check logs."
+             logging.error(f"Tunnel initialization failed for '{TUNNEL_NAME}'. Could not get ID and Token.")
         else:
              # An error was already set by find/create/token functions
              tunnel_state["status_message"] = "Tunnel initialization failed (see error details)."
+             logging.error(f"Tunnel initialization failed for '{TUNNEL_NAME}' due to API error: {tunnel_state['error']}")
 
     except Exception as e:
         # Catch any unexpected errors during the process
         logging.error(f"Unhandled exception during tunnel initialization: {e}", exc_info=True)
         if not tunnel_state.get("error"): # Avoid overwriting a more specific API error
-            tunnel_state["error"] = f"Initialization failed: {e}"
+            tunnel_state["error"] = f"Initialization failed unexpectedly: {e}"
         tunnel_state["status_message"] = "Tunnel initialization failed (unexpected error)."
 
 # --- Cloudflare Tunnel Configuration Management ---
@@ -276,7 +334,7 @@ def get_current_cf_config():
     try:
         response_data = cf_api_request("GET", endpoint)
         # Check structure carefully based on actual Cloudflare API response
-        if response_data and isinstance(response_data, dict) and response_data.get("success"):
+        if response_data and response_data.get("success"): # cf_api_request should guarantee this structure or raise error
             result_data = response_data.get("result")
             if isinstance(result_data, dict):
                  config_data = result_data.get("config")
@@ -290,46 +348,44 @@ def get_current_cf_config():
                  else:
                      logging.warning(f"Unexpected type for 'config' field in API response. Expected dict or null, got {type(config_data)}. Response: {response_data}")
                      return {} # Treat as empty/invalid
+            # Handle case where result is present but not a dict (API inconsistency?)
+            elif result_data is None and response_data.get("success"):
+                 logging.info("Fetched config result is null (no configuration set yet). Returning empty config.")
+                 return {}
             else:
-                logging.warning(f"API response success but no 'result' dict or unexpected format. Response: {response_data}")
+                logging.warning(f"API response success but 'result' has unexpected format or is missing. Response: {response_data}")
                 return {} # Treat as empty/invalid
-        elif response_data:
-            logging.warning(f"API response format unexpected or success=false. Response: {response_data}")
-            # Attempt to extract error if possible
-            cf_errors = response_data.get('errors', [])
-            if cf_errors: tunnel_state["error"] = f"Failed get tunnel config: {cf_errors[0].get('message', 'Unknown API error')}"
-            return None # Indicate failure
         else:
-            # This case shouldn't happen if cf_api_request works correctly, but handle defensively
-            logging.error("cf_api_request returned None unexpectedly for GET config.")
+            # This case implies cf_api_request failed or returned non-success somehow (should have raised)
+            logging.error(f"get_current_cf_config: cf_api_request did not return success or expected data. Response: {response_data}")
             return None # Indicate failure
 
     except requests.exceptions.RequestException as e: # Catch API errors specifically
         logging.error(f"API error fetching config for tunnel {tunnel_state['id']}: {e}")
-        if not tunnel_state.get("error") or "API Error" not in tunnel_state["error"]: # Avoid overwriting init errors
+        # Store error for UI feedback, avoid overwriting init errors if possible
+        if not tunnel_state.get("error") or "API Error" not in tunnel_state["error"]:
              tunnel_state["error"] = f"Failed get tunnel config: {e}"
         return None # Indicate failure
     except Exception as e: # Catch other unexpected errors
         logging.error(f"Unexpected exception in get_current_cf_config: {e}", exc_info=True)
-        if not tunnel_state.get("error"): tunnel_state["error"] = f"Failed get/parse tunnel config: {e}"
+        if not tunnel_state.get("error"): tunnel_state["error"] = f"Unexpected error getting tunnel config: {e}"
         return None # Indicate failure
 
 
 def update_cloudflare_config():
+    # Debounce logic could be added here if needed
+    # time.sleep(1) # Simple debounce: wait 1 sec before proceeding
+
     if not tunnel_state.get("id"):
         logging.warning("Cannot update Cloudflare config, tunnel ID not available.")
         return False
 
     # Perform read/modify of managed_rules and CF config fetch inside lock
-    with state_lock:
-        logging.info("Attempting to prepare Cloudflare tunnel configuration update...")
+    final_ingress_rules = None # Will hold the config to push
+    needs_api_update = False   # Flag if API call is necessary
 
-        # Fetch current config from Cloudflare first
-        current_config = get_current_cf_config()
-        if current_config is None:
-            logging.error("Failed to fetch current Cloudflare config, aborting update.")
-            # Error should already be set in tunnel_state by get_current_cf_config
-            return False
+    with state_lock:
+        logging.info("Preparing potential Cloudflare tunnel configuration update...")
 
         # Build the desired ingress rules based on current *active* managed rules
         desired_ingress_rules = []
@@ -346,74 +402,95 @@ def update_cloudflare_config():
                 else:
                     logging.warning(f"Managed rule for '{hostname}' is active but missing 'service' detail. Skipping.")
 
+        # Fetch current config from Cloudflare *inside* the lock to ensure atomicity of compare-and-set logic
+        logging.debug("Fetching current Cloudflare config for comparison...")
+        current_config = get_current_cf_config()
+        if current_config is None:
+            logging.error("Failed to fetch current Cloudflare config within lock, aborting update.")
+            # Error should already be set in tunnel_state by get_current_cf_config
+            return False # Abort the update attempt
+
         # Get existing ingress rules from Cloudflare, excluding the catch-all
         current_cf_ingress = [rule for rule in current_config.get("ingress", [])
                               if rule.get("service") != catch_all_rule["service"]]
 
-        # Check if the desired set (excluding catch-all) matches the current set (excluding catch-all)
-        # Convert rules to a comparable format (e.g., tuples of sorted items) to ignore order
-        def rule_to_tuple(rule):
-            # Ensure hostname and service exist for comparison
-            if "hostname" in rule and "service" in rule:
-                 return tuple(sorted(rule.items()))
-            return None # Ignore rules missing key fields
+        # Compare the desired set (excluding catch-all) with the current set (excluding catch-all)
+        # Use a canonical representation (tuple of sorted items) for comparison
+        def rule_to_canonical(rule):
+            items = sorted(rule.items())
+            # Filter out optional/empty fields if necessary for consistent comparison
+            # items = [item for item in items if item[1] is not None and item[1] != {}]
+            return tuple(items)
 
-        current_cf_set = {rule_to_tuple(rule) for rule in current_cf_ingress if rule_to_tuple(rule)}
-        desired_set = {rule_to_tuple(rule) for rule in desired_ingress_rules if rule_to_tuple(rule)}
+        # Handle potential missing fields for comparison safety
+        try:
+             current_cf_set = {rule_to_canonical(rule) for rule in current_cf_ingress if rule.get("hostname") and rule.get("service")}
+             desired_set = {rule_to_canonical(rule) for rule in desired_ingress_rules if rule.get("hostname") and rule.get("service")}
+        except Exception as e:
+             logging.error(f"Error creating canonical rule sets for comparison: {e}", exc_info=True)
+             return False # Abort if comparison fails
 
         # Compare the sets
         if current_cf_set == desired_set:
             logging.info("No changes detected between managed state and Cloudflare config. Skipping API update.")
-            return True # No update needed, success
+            needs_api_update = False
+        else:
+            logging.info("Change detected. Desired ingress rules differ from current Cloudflare config.")
+            logging.debug(f"Current CF rules (non-404, canonical): {current_cf_set}")
+            logging.debug(f"Desired rules (from state, canonical): {desired_set}")
+            needs_api_update = True
+            # Prepare the final list of rules to push (desired + catch-all)
+            final_ingress_rules = desired_ingress_rules + [catch_all_rule]
 
-        logging.info("Change detected. Desired ingress rules differ from current Cloudflare config.")
-        logging.debug(f"Current CF rules (non-404): {current_cf_ingress}")
-        logging.debug(f"Desired rules (from state): {desired_ingress_rules}")
+        # Lock released automatically when exiting 'with' block
+        pass
 
-        # Prepare the final list of rules to push (desired + catch-all)
-        final_ingress_rules = desired_ingress_rules + [catch_all_rule]
+    # --- API call outside the lock (only if needed) ---
+    if needs_api_update and final_ingress_rules is not None:
+        logging.info("Pushing updated configuration to Cloudflare API...")
+        endpoint = f"/accounts/{CF_ACCOUNT_ID}/cfd_tunnel/{tunnel_state['id']}/configurations"
         payload = {"config": {"ingress": final_ingress_rules}}
+        try:
+            cf_api_request("PUT", endpoint, json_data=payload)
+            logging.info("Successfully updated Cloudflare tunnel configuration via API.")
+            # Provide feedback in UI state (can be overwritten by other actions quickly)
+            cloudflared_agent_state["last_action_status"] = f"Cloudflare config updated successfully at {datetime.now(timezone.utc).isoformat()}"
+            return True
+        except requests.exceptions.RequestException as e: # Catch API errors specifically
+            logging.error(f"Failed to update Cloudflare tunnel configuration via API: {e}")
+            # Update state to show error in UI
+            cloudflared_agent_state["last_action_status"] = f"Error updating CF config: {e}"
+            # Store potentially more detailed error in tunnel_state if available
+            if not tunnel_state.get("error") or "API Error" not in tunnel_state["error"]:
+                 tunnel_state["error"] = f"Failed update tunnel config: {e}"
+            return False
+        except Exception as e: # Catch any other unexpected error during the PUT request
+            logging.error(f"Unexpected error updating Cloudflare config: {e}", exc_info=True)
+            cloudflared_agent_state["last_action_status"] = f"Error: Unexpected error updating CF config: {e}"
+            if not tunnel_state.get("error"): tunnel_state["error"] = f"Unexpected error updating tunnel config: {e}"
+            return False
+    elif needs_api_update and final_ingress_rules is None:
+         # This case shouldn't happen if logic is correct, but handle defensively
+         logging.error("Internal error: Needs API update but final_ingress_rules not set.")
+         return False
+    else:
+         # No update was needed
+         return True
 
-        # Release lock before making the potentially slow API call
-        pass # Exiting the 'with state_lock' block releases the lock
-
-    # --- API call outside the lock ---
-    logging.info("Pushing updated configuration to Cloudflare API...")
-    endpoint = f"/accounts/{CF_ACCOUNT_ID}/cfd_tunnel/{tunnel_state['id']}/configurations"
-    try:
-        cf_api_request("PUT", endpoint, json_data=payload)
-        logging.info("Successfully updated Cloudflare tunnel configuration via API.")
-        cloudflared_agent_state["last_action_status"] = "Cloudflare config updated successfully." # Give feedback
-        return True
-    except requests.exceptions.RequestException as e:
-        # Log the specific API error
-        logging.error(f"Failed to update Cloudflare tunnel configuration via API: {e}")
-        # Update state to show error in UI
-        cloudflared_agent_state["last_action_status"] = f"Error updating CF config: {e}"
-        # Also store potentially more detailed error in tunnel_state if available
-        if not tunnel_state.get("error") or "API Error" not in tunnel_state["error"]:
-             tunnel_state["error"] = f"Failed update tunnel config: {e}"
-        return False
-    except Exception as e:
-        # Catch any other unexpected error during the PUT request
-        logging.error(f"Unexpected error updating Cloudflare config: {e}", exc_info=True)
-        cloudflared_agent_state["last_action_status"] = f"Error: Unexpected error updating CF config: {e}"
-        if not tunnel_state.get("error"): tunnel_state["error"] = f"Failed update tunnel config: {e}"
-        return False
 
 # --- Docker Event Handling ---
 def process_container_start(container):
     if not container: return
     try:
+        container_id = container.id # Get ID early for logging
         # It's possible the container disappears between event and processing
         try:
              container.reload()
         except NotFound:
-             logging.warning(f"Container {container.id[:12]} not found when processing start event (likely stopped quickly).")
+             logging.warning(f"Container {container_id[:12]} not found when processing start event (likely stopped quickly).")
              return
 
         labels = container.labels
-        container_id = container.id
         container_name = container.name # Get name for logging/debugging
 
         # Check labels
@@ -436,24 +513,22 @@ def process_container_start(container):
             return
 
         # Basic validation (can be enhanced)
-        if not re.match(r"^[a-zA-Z0-9.-]+$", hostname):
+        # Allow domain names and potentially IPs in hostnames? Be careful.
+        # This regex is quite permissive for hostnames/subdomains.
+        if not re.match(r"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$", hostname):
              logging.warning(f"Ignoring start event for container {container_name} ({container_id[:12]}): Invalid hostname format '{hostname}'.")
              return
-        # Ensure service points to http/https/tcp/unix *or* a container name (which implies http)
-        # For bridge network, service should be like http://container_name:port
-        if not (service.startswith(("http://", "https://", "tcp://", "unix:")) or re.match(r"^[a-zA-Z0-9_-]+:\d+$", service)):
-             # Check if it's potentially just container_name:port which implies http
-             # If using bridge mode, validate service format points to internal service.
-             # Example: 'my-app:8080' will be automatically converted to 'http://my-app:8080' by cloudflared
-             # Accept formats like 'http://container:port', 'https://..', 'tcp://..', 'unix:/..', or 'container:port'
-             logging.warning(f"Ignoring start event for {container_name} ({container_id[:12]}): Invalid service format '{service}'. Needs scheme (http/https/tcp/unix) or be container_name:port.")
+
+        # Validate service format: scheme://host:port or container_name:port
+        # Allow http, https, tcp, unix. Also allow simple host:port which cloudflared defaults to http.
+        if not (re.match(r"^(https?|tcp|unix)://", service) or re.match(r"^[a-zA-Z0-9._-]+:\d+$", service)):
+             logging.warning(f"Ignoring start event for {container_name} ({container_id[:12]}): Invalid service format '{service}'. Needs scheme (http/https/tcp/unix) or be host_or_container_name:port.")
              return
 
         logging.info(f"Detected start for managed container: {container_name} ({container_id[:12]}) - Hostname: {hostname}, Service: {service}")
 
         needs_cf_update = False
         state_changed_locally = False
-        update_needed = False # Combined flag
 
         with state_lock:
             existing_rule = managed_rules.get(hostname)
@@ -464,7 +539,7 @@ def process_container_start(container):
                     logging.info(f"Rule for {hostname} was pending deletion. Reactivating.")
                     existing_rule["status"] = "active"
                     existing_rule["delete_at"] = None
-                    existing_rule["service"] = service # Update service just in case
+                    existing_rule["service"] = service # Update service
                     existing_rule["container_id"] = container_id # Update container ID
                     state_changed_locally = True
                     needs_cf_update = True # Reactivation requires CF update
@@ -472,19 +547,21 @@ def process_container_start(container):
                 # Case 2: Rule exists, active, check if service or container changed
                 elif existing_rule.get("status") == "active":
                     service_changed = existing_rule.get("service") != service
-                    container_changed = existing_rule.get("container_id") != container_id
-                    if service_changed or container_changed:
-                         log_msg = f"Updating rule for {hostname}:"
-                         if service_changed: log_msg += f" Service changed ('{existing_rule.get('service')}' -> '{service}')."
-                         if container_changed: log_msg += f" Container changed ('{existing_rule.get('container_id', 'N/A')[:12]}' -> '{container_id[:12]}')."
-                         logging.info(log_msg)
+                    # Only update container ID if it actually changed. No CF update needed for this.
+                    if existing_rule.get("container_id") != container_id:
+                        logging.info(f"Updating container ID for active rule {hostname}: '{existing_rule.get('container_id', 'N/A')[:12]}' -> '{container_id[:12]}'.")
+                        existing_rule["container_id"] = container_id
+                        state_changed_locally = True # Save state even if only container ID changed
+
+                    # Check if service definition changed (requires CF update)
+                    if service_changed:
+                         logging.info(f"Updating service for active rule {hostname}: '{existing_rule.get('service')}' -> '{service}'.")
                          existing_rule["service"] = service
-                         existing_rule["container_id"] = container_id
                          state_changed_locally = True
-                         # Only need CF update if the *service* definition changed
-                         if service_changed: needs_cf_update = True
-                    else:
+                         needs_cf_update = True
+                    elif not state_changed_locally: # If only container ID didn't change either
                          logging.info(f"Container start event for {hostname}, but rule is already active with same details.")
+
             else:
                 # Case 3: New rule
                 logging.info(f"Adding new active rule for hostname: {hostname}")
@@ -497,8 +574,6 @@ def process_container_start(container):
                 state_changed_locally = True
                 needs_cf_update = True # Adding a rule requires CF update
 
-            update_needed = state_changed_locally or needs_cf_update
-
             # --- Save state immediately if changed locally ---
             if state_changed_locally:
                 logging.debug(f"Local state changed for {hostname}, saving state file...")
@@ -508,21 +583,17 @@ def process_container_start(container):
         if needs_cf_update:
             logging.info(f"Triggering Cloudflare config update due to change for {hostname}.")
             if not update_cloudflare_config():
-                # If CF update fails, the state is saved but CF is out of sync.
-                # Reconciliation should eventually fix this, but log error.
                 logging.error(f"Failed to update Cloudflare config after processing start for {hostname}. State might be inconsistent until next reconciliation.")
-                # Optionally: could revert the local state change here, but complicates logic. Rely on reconcile.
         elif state_changed_locally:
              logging.debug(f"Local state updated for {hostname} (e.g., container ID), no Cloudflare config change needed.")
 
-
     except NotFound:
         # This can happen if container is removed very quickly after start event
-        logging.warning(f"Container {container.id[:12] if container else 'Unknown'} not found during start processing.")
+        logging.warning(f"Container {container_id[:12] if 'container_id' in locals() else 'Unknown'} not found during start processing.")
     except APIError as e:
-        logging.error(f"Docker API error processing container start ({container.id[:12] if container else 'Unknown'}): {e}", exc_info=True)
+        logging.error(f"Docker API error processing container start ({container_id[:12] if 'container_id' in locals() else 'Unknown'}): {e}", exc_info=True)
     except Exception as e:
-        logging.error(f"Unexpected error processing container start ({container.id[:12] if container else 'Unknown'}): {e}", exc_info=True)
+        logging.error(f"Unexpected error processing container start ({container_id[:12] if 'container_id' in locals() else 'Unknown'}): {e}", exc_info=True)
 
 
 def schedule_container_stop(container_id):
@@ -546,7 +617,7 @@ def schedule_container_stop(container_id):
                  rule["status"] = "pending_deletion"
                  # Ensure delete_at is timezone-aware (UTC)
                  rule["delete_at"] = datetime.now(timezone.utc) + timedelta(seconds=GRACE_PERIOD_SECONDS)
-                 logging.info(f"Rule for {hostname_to_schedule} scheduled for deletion at {rule['delete_at']}")
+                 logging.info(f"Rule for {hostname_to_schedule} scheduled for deletion at {rule['delete_at'].isoformat()}")
                  state_changed = True
             else:
                  logging.info(f"Rule for {hostname_to_schedule} was already pending deletion.")
@@ -564,58 +635,79 @@ def docker_event_listener():
         logging.error("Docker client unavailable, event listener cannot start.")
         return
     logging.info("Starting Docker event listener...")
-    try:
-        # Get events from now onwards
-        events = docker_client.events(decode=True, since=int(time.time()))
-        for event in events:
-            if stop_event.is_set():
-                logging.info("Stop event received, exiting Docker event listener.")
-                break
+    error_count = 0
+    max_errors = 5 # Stop trying if Docker errors persist
 
-            ev_type = event.get("Type")
-            action = event.get("Action")
-            actor = event.get("Actor", {})
-            cont_id = actor.get("ID")
+    while not stop_event.is_set() and error_count < max_errors:
+        try:
+            # Get events from now onwards
+            logging.info("Connecting to Docker event stream...")
+            events = docker_client.events(decode=True, since=int(time.time()))
+            logging.info("Successfully connected to Docker event stream.")
+            error_count = 0 # Reset error count on successful connection
 
-            logging.debug(f"Docker Event: Type={ev_type}, Action={action}, ActorID={cont_id[:12] if cont_id else 'N/A'}")
+            for event in events:
+                if stop_event.is_set():
+                    logging.info("Stop event received, exiting Docker event listener loop.")
+                    break
 
-            # We only care about container events with an ID
-            if ev_type == "container" and cont_id:
-                if action == "start":
-                    # Need to get the container object to read labels
-                    try:
-                        container = docker_client.containers.get(cont_id)
-                        process_container_start(container)
-                    except NotFound:
-                        # Can happen if container stops again very quickly
-                        logging.warning(f"Container {cont_id[:12]} not found shortly after 'start' event.")
-                    except APIError as e:
-                         logging.error(f"Docker API error getting container {cont_id[:12]} after start event: {e}")
-                    except Exception as e:
-                         logging.error(f"Error processing start event for {cont_id[:12]}: {e}", exc_info=True)
+                ev_type = event.get("Type")
+                action = event.get("Action")
+                actor = event.get("Actor", {})
+                cont_id = actor.get("ID")
 
-                # Treat stop, die, destroy as triggers to schedule deletion
-                elif action in ["stop", "die", "destroy"]:
-                     try:
-                         schedule_container_stop(cont_id)
-                     except Exception as e:
-                         logging.error(f"Error processing stop/die event for {cont_id[:12]}: {e}", exc_info=True)
+                logging.debug(f"Docker Event: Type={ev_type}, Action={action}, ActorID={cont_id[:12] if cont_id else 'N/A'}")
 
-    except APIError as e:
-         # Handle errors like Docker daemon stopping
-         logging.error(f"Docker API error in event listener stream: {e}. Listener stopping.")
-         # Consider trying to restart the listener after a delay? For now, it stops.
-    except Exception as e:
-        # Catch other unexpected errors
-        logging.error(f"Unexpected error in Docker event listener: {e}", exc_info=True)
-    finally:
-        logging.info("Docker event listener stopped.")
+                # We only care about container events with an ID
+                if ev_type == "container" and cont_id:
+                    if action == "start":
+                        # Need to get the container object to read labels
+                        try:
+                            container = docker_client.containers.get(cont_id)
+                            # Run processing in a separate thread? For now, synchronous.
+                            process_container_start(container)
+                        except NotFound:
+                            # Can happen if container stops again very quickly
+                            logging.warning(f"Container {cont_id[:12]} not found shortly after 'start' event.")
+                        except APIError as e:
+                             logging.error(f"Docker API error getting container {cont_id[:12]} after start event: {e}")
+                        except Exception as e:
+                             logging.error(f"Error processing start event for {cont_id[:12]}: {e}", exc_info=True)
+
+                    # Treat stop, die, destroy as triggers to schedule deletion
+                    elif action in ["stop", "die", "destroy", "kill"]: # Added kill
+                         try:
+                             schedule_container_stop(cont_id)
+                         except Exception as e:
+                             logging.error(f"Error processing stop/die/destroy/kill event for {cont_id[:12]}: {e}", exc_info=True)
+
+        except requests.exceptions.ConnectionError as e:
+             error_count += 1
+             logging.error(f"Connection error with Docker daemon in event listener: {e}. Attempting reconnect ({error_count}/{max_errors})...")
+             stop_event.wait(5 * error_count) # Exponential backoff wait
+        except APIError as e:
+             error_count += 1
+             # Handle errors like Docker daemon stopping
+             logging.error(f"Docker API error in event listener stream: {e}. Attempting reconnect ({error_count}/{max_errors})...")
+             stop_event.wait(5 * error_count) # Exponential backoff wait
+        except Exception as e:
+             error_count += 1
+             # Catch other unexpected errors
+             logging.error(f"Unexpected error in Docker event listener: {e}. Attempting reconnect ({error_count}/{max_errors})...", exc_info=True)
+             stop_event.wait(5 * error_count) # Exponential backoff wait
+
+        if stop_event.is_set(): break # Check stop event after handling error/waiting
+
+    if error_count >= max_errors:
+         logging.error("Docker event listener stopping after multiple connection/API errors.")
+    logging.info("Docker event listener stopped.")
 
 
 # --- Cleanup Task ---
 def cleanup_expired_rules():
     logging.info("Starting cleanup task...")
     while not stop_event.is_set():
+        next_check_time = time.time() + CLEANUP_INTERVAL_SECONDS
         try:
             logging.debug("Running cleanup check for expired rules...")
             hostnames_to_remove_from_cf = []
@@ -629,32 +721,42 @@ def cleanup_expired_rules():
                         delete_at = details.get("delete_at")
                         # Ensure delete_at is a timezone-aware datetime object
                         if isinstance(delete_at, datetime):
-                             if delete_at.tzinfo is None: # If loaded state was naive, assume UTC
-                                 delete_at = delete_at.replace(tzinfo=timezone.utc)
-                             if delete_at <= now_utc:
-                                 logging.info(f"Rule for {hostname} deletion grace period expired ({delete_at}). Scheduling removal from Cloudflare.")
+                             # Ensure it's UTC for comparison
+                             delete_at_utc = delete_at.astimezone(timezone.utc)
+                             if delete_at_utc <= now_utc:
+                                 logging.info(f"Rule for {hostname} deletion grace period expired ({delete_at_utc.isoformat()}). Scheduling removal from Cloudflare.")
                                  hostnames_to_remove_from_cf.append(hostname)
                         else:
-                             logging.warning(f"Rule {hostname} is pending_deletion but delete_at is invalid or missing: {delete_at}. Skipping cleanup for this rule.")
+                             logging.warning(f"Rule {hostname} is pending_deletion but delete_at is invalid or missing: {delete_at}. Removing immediately as state is invalid.")
+                             # Treat invalid delete_at as immediately expired for cleanup
+                             hostnames_to_remove_from_cf.append(hostname)
+
 
             # --- Trigger CF Update & State Change (outside initial lock) ---
             if hostnames_to_remove_from_cf:
-                logging.info(f"Attempting Cloudflare update to remove expired rules: {hostnames_to_remove_from_cf}")
+                logging.info(f"Attempting Cloudflare update to remove expired/invalid rules: {hostnames_to_remove_from_cf}")
                 # Important: We update CF based on the *current* active rules,
                 # implicitly removing those not marked active anymore.
                 if update_cloudflare_config():
-                    logging.info(f"Cloudflare config updated successfully. Removing expired rules from local state: {hostnames_to_remove_from_cf}")
+                    logging.info(f"Cloudflare config updated successfully. Removing expired/invalid rules from local state: {hostnames_to_remove_from_cf}")
                     # Now, actually remove them from the local state dictionary
                     with state_lock:
                         deleted_count = 0
                         for hostname in hostnames_to_remove_from_cf:
-                            # Double-check rule still exists and is pending before deleting
-                            if hostname in managed_rules and managed_rules[hostname].get("status") == "pending_deletion":
-                                del managed_rules[hostname]
-                                deleted_count += 1
-                                state_changed_in_cleanup = True
+                            # Double-check rule still exists and is pending or invalid before deleting
+                            if hostname in managed_rules:
+                                rule_status = managed_rules[hostname].get("status")
+                                rule_delete_at = managed_rules[hostname].get("delete_at")
+                                if rule_status == "pending_deletion" or not isinstance(rule_delete_at, datetime):
+                                     del managed_rules[hostname]
+                                     deleted_count += 1
+                                     state_changed_in_cleanup = True
+                                else:
+                                     # Rule might have been reactivated between check and update
+                                     logging.warning(f"Rule {hostname} was scheduled for removal but state changed before local deletion (Status: {rule_status}). No longer removing from state.")
                             else:
-                                logging.warning(f"Rule {hostname} was scheduled for removal but not found or no longer 'pending_deletion' when removing from state.")
+                                logging.warning(f"Rule {hostname} was scheduled for removal but already removed from state.")
+
                         logging.info(f"Removed {deleted_count} rules from local state.")
                         # Save state only if rules were actually deleted
                         if state_changed_in_cleanup:
@@ -667,8 +769,9 @@ def cleanup_expired_rules():
         except Exception as e:
             logging.error(f"Error in cleanup task loop: {e}", exc_info=True)
 
-        # Wait for the next interval or until stop event is set
-        stop_event.wait(CLEANUP_INTERVAL_SECONDS)
+        # Wait for the next interval or until stop event is set, accounting for task duration
+        wait_time = max(0, next_check_time - time.time())
+        stop_event.wait(wait_time)
 
     logging.info("Cleanup task stopped.")
 
@@ -691,13 +794,17 @@ def reconcile_state():
         # 1. Running Docker Containers with Labels
         running_labeled_containers = {} # { hostname: { service, container_id, container_name } }
         try:
-             containers = docker_client.containers.list(sparse=True) # sparse=True might be faster
+             # List all running containers
+             containers = docker_client.containers.list(sparse=False) # sparse=False needed for labels? Check SDK docs.
              logging.debug(f"[Reconcile] Found {len(containers)} running containers.")
              for c in containers:
-                 # Need full inspect for labels if sparse doesn't include them
+                 # Get labels directly from list result if possible, else reload needed. Assume reload needed for safety.
                  try:
-                     c.reload() # Get full attributes including labels
+                     # c.reload() # Might not be necessary if list(sparse=False) includes labels
                      labels = c.labels
+                     container_id = c.id
+                     container_name = c.name
+
                      enabled_label = f"{LABEL_PREFIX}.enable"
                      hostname_label = f"{LABEL_PREFIX}.hostname"
                      service_label = f"{LABEL_PREFIX}.service"
@@ -708,21 +815,21 @@ def reconcile_state():
 
                      if is_enabled and hostname and service:
                          # Basic validation again
-                         if not re.match(r"^[a-zA-Z0-9.-]+$", hostname): continue
-                         if not (service.startswith(("http://", "https://", "tcp://", "unix:")) or re.match(r"^[a-zA-Z0-9_-]+:\d+$", service)): continue
+                         if not re.match(r"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$", hostname): continue
+                         if not (re.match(r"^(https?|tcp|unix)://", service) or re.match(r"^[a-zA-Z0-9._-]+:\d+$", service)): continue
 
                          if hostname in running_labeled_containers:
-                              logging.warning(f"[Reconcile] Duplicate hostname label '{hostname}' found on container {c.name} ({c.id[:12]}) and container {running_labeled_containers[hostname]['container_name']} ({running_labeled_containers[hostname]['container_id'][:12]}). Using the latest one found ({c.name}).")
+                              logging.warning(f"[Reconcile] Duplicate hostname label '{hostname}' found on container {container_name} ({container_id[:12]}) and container {running_labeled_containers[hostname]['container_name']} ({running_labeled_containers[hostname]['container_id'][:12]}). Using the latest one found ({container_name}).")
                          running_labeled_containers[hostname] = {
                              "service": service,
-                             "container_id": c.id,
-                             "container_name": c.name
+                             "container_id": container_id,
+                             "container_name": container_name
                          }
                  except NotFound:
-                      logging.warning(f"[Reconcile] Container {c.id[:12]} listed but then not found during reload. Skipping.")
+                      logging.warning(f"[Reconcile] Container {c.id[:12]} listed but then not found during processing. Skipping.")
                       continue # Skip this container if it disappeared
                  except APIError as e:
-                      logging.error(f"[Reconcile] Docker API error reloading container {c.id[:12]}: {e}. Skipping.")
+                      logging.error(f"[Reconcile] Docker API error processing container {c.id[:12]}: {e}. Skipping.")
                       continue
 
              logging.info(f"[Reconcile] Found {len(running_labeled_containers)} running containers with valid labels.")
@@ -730,9 +837,9 @@ def reconcile_state():
         except APIError as e:
              logging.error(f"[Reconcile] Docker API error listing containers: {e}. Aborting reconciliation.")
              return
-
-        # 2. Current Cloudflare Configuration (fetch outside lock if possible, but needs lock for comparison later)
-        # Moved get_current_cf_config inside lock logic below where needed for comparison
+        except requests.exceptions.ConnectionError as e: # Handle Docker daemon down
+             logging.error(f"[Reconcile] Failed to connect to Docker daemon while listing containers: {e}. Aborting reconciliation.")
+             return
 
         # --- Perform Reconciliation Logic (under lock) ---
         with state_lock:
@@ -741,7 +848,7 @@ def reconcile_state():
             managed_hostnames = set(managed_rules.keys())
             running_hostnames = set(running_labeled_containers.keys())
 
-            # Iterate through running labeled containers
+            # Iterate through running labeled containers found
             for hostname, running_details in running_labeled_containers.items():
                 if hostname in managed_rules:
                     rule = managed_rules[hostname]
@@ -756,14 +863,17 @@ def reconcile_state():
                         needs_cf_update = True
                     # Scenario 2: Rule exists and active -> Check if service/container changed
                     elif rule.get("status") == "active":
-                         service_changed = rule.get("service") != running_details["service"]
-                         container_changed = rule.get("container_id") != running_details["container_id"]
-                         if service_changed or container_changed:
-                              logging.info(f"[Reconcile] Updating state for active rule {hostname} (service/container changed).")
+                         # Update container ID if it changed (no CF update needed)
+                         if rule.get("container_id") != running_details["container_id"]:
+                             logging.info(f"[Reconcile] Updating container ID for active rule {hostname}.")
+                             rule["container_id"] = running_details["container_id"]
+                             state_changed_locally = True
+                         # Update service if it changed (CF update needed)
+                         if rule.get("service") != running_details["service"]:
+                              logging.info(f"[Reconcile] Updating service for active rule {hostname}.")
                               rule["service"] = running_details["service"]
-                              rule["container_id"] = running_details["container_id"]
                               state_changed_locally = True
-                              if service_changed: needs_cf_update = True # Only need CF update if service changed
+                              needs_cf_update = True # Set flag only if service changed
                 else:
                     # Scenario 3: Container running but no rule exists -> Add new rule
                     logging.info(f"[Reconcile] Found running container for {hostname} but no managed rule. Adding new rule.")
@@ -779,38 +889,43 @@ def reconcile_state():
             # Iterate through managed rules to find ones that are no longer running
             for hostname in list(managed_hostnames): # Iterate over copy of keys
                 if hostname not in running_hostnames:
-                     rule = managed_rules[hostname]
-                     # Scenario 4: Rule is active but container not running -> Schedule deletion
-                     if rule.get("status") == "active":
-                          logging.info(f"[Reconcile] Managed rule {hostname} is active but no container found running. Scheduling deletion.")
-                          rule["status"] = "pending_deletion"
-                          rule["delete_at"] = now_utc + timedelta(seconds=GRACE_PERIOD_SECONDS)
-                          state_changed_locally = True
-                          # Deletion doesn't trigger immediate CF update, cleanup task handles it.
-                     # Scenario 5: Rule is pending deletion and container still not running -> Do nothing, let cleanup handle it
-                     elif rule.get("status") == "pending_deletion":
-                          logging.debug(f"[Reconcile] Rule {hostname} is pending deletion and container not running. No action needed.")
+                     # Check if rule still exists (might have been deleted by force_delete)
+                     if hostname in managed_rules:
+                         rule = managed_rules[hostname]
+                         # Scenario 4: Rule is active but container not running -> Schedule deletion
+                         if rule.get("status") == "active":
+                              logging.info(f"[Reconcile] Managed rule {hostname} is active but no container found running. Scheduling deletion.")
+                              rule["status"] = "pending_deletion"
+                              rule["delete_at"] = now_utc + timedelta(seconds=GRACE_PERIOD_SECONDS)
+                              state_changed_locally = True
+                              # Deletion doesn't trigger immediate CF update, cleanup task handles it.
+                         # Scenario 5: Rule is pending deletion and container still not running -> Do nothing, let cleanup handle it
+                         elif rule.get("status") == "pending_deletion":
+                              logging.debug(f"[Reconcile] Rule {hostname} is pending deletion and container not running. No action needed.")
 
-            # --- Optional: Compare with actual CF config for deeper reconciliation ---
-            # This makes reconcile slower but more robust against external CF changes
+            # --- Compare with actual CF config for deeper reconciliation ---
+            # Fetch CF config *within the lock* if we plan to modify state based on it
             logging.debug("[Reconcile] Fetching current CF config for final comparison...")
             current_cf_config = get_current_cf_config()
             if current_cf_config is not None:
                 cf_ingress_hostnames = {r.get("hostname") for r in current_cf_config.get("ingress", [])
                                          if r.get("hostname") and r.get("service") != "http_status:404"}
+                # Get hostnames that are currently *supposed* to be active in our state
                 active_managed_hostnames = {hn for hn, d in managed_rules.items() if d.get("status") == "active"}
 
-                # If CF has hostnames that our active state doesn't, something is off.
-                # This could happen if a rule was deleted locally but CF update failed.
-                # Triggering an update based on our current state should fix it.
+                # If CF has hostnames that our active state doesn't, or vice-versa
                 if cf_ingress_hostnames != active_managed_hostnames:
-                     logging.warning(f"[Reconcile] Mismatch detected between active managed rules and Cloudflare config!")
-                     logging.warning(f"[Reconcile] Active Managed: {active_managed_hostnames}")
-                     logging.warning(f"[Reconcile] Found in CF: {cf_ingress_hostnames}")
-                     logging.info("[Reconcile] Marking for Cloudflare update to align.")
-                     needs_cf_update = True
+                     logging.warning(f"[Reconcile] Mismatch detected between active managed rules ({len(active_managed_hostnames)}) and Cloudflare config ({len(cf_ingress_hostnames)})!")
+                     logging.info(f"[Reconcile] Active Managed State: {sorted(list(active_managed_hostnames))}")
+                     logging.info(f"[Reconcile] Found in Cloudflare: {sorted(list(cf_ingress_hostnames))}")
+                     # This indicates inconsistency. Triggering an update based on our
+                     # current desired state (active_managed_hostnames) is the corrective action.
+                     logging.info("[Reconcile] Marking for Cloudflare update to enforce local state.")
+                     needs_cf_update = True # Ensure CF reflects our calculated state
             else:
                 logging.error("[Reconcile] Could not fetch Cloudflare config during reconciliation. Skipping final comparison.")
+                # Potentially skip state saving if comparison failed? Or proceed with Docker-based changes?
+                # For now, proceed with changes based on Docker state.
 
             # --- Save state if changed locally ---
             if state_changed_locally:
@@ -826,9 +941,9 @@ def reconcile_state():
             if not update_cloudflare_config():
                 logging.error("[Reconcile] Failed to update Cloudflare config during reconciliation.")
         elif state_changed_locally:
-            logging.info("[Reconcile] Reconciliation resulted in local state changes only.")
+            logging.info("[Reconcile] Reconciliation resulted in local state changes only (no CF update needed).")
         else:
-            logging.info("[Reconcile] No changes detected during reconciliation.")
+            logging.info("[Reconcile] No changes required by reconciliation.")
 
     except Exception as e:
         logging.error(f"Unexpected error during state reconciliation: {e}", exc_info=True)
@@ -850,35 +965,65 @@ def get_cloudflared_container():
         logging.error(f"Docker API error getting container '{CLOUDFLARED_CONTAINER_NAME}': {e}")
         cloudflared_agent_state["last_action_status"] = f"Error: Docker API error getting agent: {e}"
         return None
-    except Exception as e:
-        logging.error(f"Unexpected error getting container '{CLOUDFLARED_CONTAINER_NAME}': {e}")
+    except requests.exceptions.ConnectionError as e: # Handle Docker daemon down
+        logging.error(f"Failed to connect to Docker daemon while getting container: {e}")
+        if docker_client: # Attempt to reset client? Maybe not safe.
+             pass
+        cloudflared_agent_state["last_action_status"] = f"Error: Docker connection failed getting agent: {e}"
+        return None
+    except Exception as e: # Catch other unexpected errors
+        logging.error(f"Unexpected error getting container '{CLOUDFLARED_CONTAINER_NAME}': {e}", exc_info=True)
         cloudflared_agent_state["last_action_status"] = f"Error: Unexpected error getting agent: {e}"
         return None
 
 
 def update_cloudflared_container_status():
+    global docker_client # Allow modification if connection lost
     if not docker_client:
-        if cloudflared_agent_state["container_status"] != "docker_unavailable":
-             logging.warning("Docker client not available, setting agent status.")
-             cloudflared_agent_state["container_status"] = "docker_unavailable"
-        return
+        # Try to reconnect if client is None
+        logging.warning("Docker client unavailable, attempting to reconnect...")
+        try:
+            docker_client = docker.from_env(timeout=5)
+            docker_client.ping()
+            logging.info("Successfully reconnected to Docker daemon.")
+            # Reset status if we were disconnected
+            if cloudflared_agent_state["container_status"] == "docker_unavailable":
+                 cloudflared_agent_state["container_status"] = "unknown" # Re-check status below
+        except Exception as e:
+             logging.error(f"Failed to reconnect to Docker daemon: {e}")
+             if cloudflared_agent_state["container_status"] != "docker_unavailable":
+                 logging.warning("Setting agent status to docker_unavailable.")
+                 cloudflared_agent_state["container_status"] = "docker_unavailable"
+             docker_client = None # Ensure it stays None
+             return # Cannot proceed without client
 
+    # Proceed if client exists (or was just reconnected)
     container = get_cloudflared_container()
     if container:
         try:
             container.reload() # Get fresh status
-            if cloudflared_agent_state["container_status"] != container.status:
-                 logging.info(f"Cloudflared agent container status changed to: {container.status}")
-                 cloudflared_agent_state["container_status"] = container.status
+            new_status = container.status
+            if cloudflared_agent_state["container_status"] != new_status:
+                 logging.info(f"Cloudflared agent container status changed to: {new_status}")
+                 cloudflared_agent_state["container_status"] = new_status
+                 # Clear last action status if container is now running
+                 if new_status == 'running': cloudflared_agent_state["last_action_status"] = None
         except (NotFound, APIError) as e:
             # Handle case where container disappeared between get() and reload()
             if cloudflared_agent_state["container_status"] != "not_found":
                  logging.warning(f"Error reloading cloudflared container status (container likely removed): {e}")
                  cloudflared_agent_state["container_status"] = "not_found"
                  cloudflared_agent_state["last_action_status"] = "Agent container disappeared."
+        except requests.exceptions.ConnectionError as e:
+            logging.error(f"Failed to connect to Docker daemon during status update: {e}")
+            cloudflared_agent_state["container_status"] = "docker_unavailable"
+            docker_client = None # Mark client as unusable again
+            return
     else:
         # Container not found by get_cloudflared_container
-        if cloudflared_agent_state["container_status"] != "not_found":
+        current_status = cloudflared_agent_state.get("container_status", "unknown")
+        # Only log change if it wasn't already 'not_found' or 'unavailable'
+        if current_status not in ["not_found", "docker_unavailable"]:
             logging.info("Cloudflared agent container not found.")
             cloudflared_agent_state["container_status"] = "not_found"
 
@@ -905,12 +1050,19 @@ def ensure_docker_network_exists(network_name):
                  logging.warning(f"Docker network '{network_name}' already exists (created concurrently?).")
                  return True # Treat as success
             logging.error(f"Failed to create Docker network '{network_name}': {e}", exc_info=True)
+            cloudflared_agent_state["last_action_status"] = f"Error creating network: {e}"
             return False
     except APIError as e:
         logging.error(f"Error checking for Docker network '{network_name}': {e}", exc_info=True)
+        cloudflared_agent_state["last_action_status"] = f"Error checking network: {e}"
         return False
-    except Exception as e:
+    except requests.exceptions.ConnectionError as e:
+        logging.error(f"Failed to connect to Docker daemon checking network '{network_name}': {e}")
+        cloudflared_agent_state["last_action_status"] = f"Error: Docker connection failed checking network."
+        return False
+    except Exception as e: # Catch other unexpected errors
         logging.error(f"Unexpected error checking/creating Docker network '{network_name}': {e}", exc_info=True)
+        cloudflared_agent_state["last_action_status"] = f"Error: Unexpected error checking network: {e}"
         return False
 
 def start_cloudflared_container():
@@ -925,8 +1077,9 @@ def start_cloudflared_container():
 
         # --- Ensure required Docker network exists ---
         if not ensure_docker_network_exists(CLOUDFLARED_NETWORK_NAME):
-             msg = f"Failed to ensure Docker network '{CLOUDFLARED_NETWORK_NAME}' exists."
-             logging.error(msg); cloudflared_agent_state["last_action_status"] = f"Error: {msg}"; return False
+             # Error message already set by ensure_docker_network_exists
+             msg = f"Failed to ensure Docker network '{CLOUDFLARED_NETWORK_NAME}' exists. Cannot start agent."
+             logging.error(msg); return False
 
         token = tunnel_state["token"]
         container = get_cloudflared_container() # Check if it exists
@@ -955,38 +1108,10 @@ def start_cloudflared_container():
                  if needs_recreate:
                       logging.info(f"Removing misconfigured container '{CLOUDFLARED_CONTAINER_NAME}' before creating a new one.")
                       try: container.remove(force=True)
-                      except APIError as rm_err: logging.error(f"Failed to remove misconfigured container: {rm_err}. Proceeding to create might fail."); needs_recreate=False # Reset flag if remove fails maybe? Or let create fail?
-                      container = None # Ensure we enterLARED_CONTAINER_NAME}': {e}. Assuming it needs creation.")
-                      container = None # Proceed to create block
-
-        # Create container if it doesn't exist or needed recreation
-        if not container and not success_flag: # Only create if not found or not successfully started above
-            # --- THIS LINE IS CORRECTED ---
-            logging.info(f"Container '{CLOUDFLARED_CONTAINER_NAME}' not found or needs creation. Creating...")
-            # --- END CORRECTION ---
-            try:
-                # Pull image first (optional, run will pull if needed but good practice)
-                try: logging.info(f"Pulling image {CLOUDFLARED_IMAGE}..."); docker_client.images.pull(CLOUDFLARED_IMAGE)
-                except APIError as img_err: logging.warning(f"Could not pull image {CLOUDFLARED_IMAGE}: {img_err}. Docker run will attempt to pull.")
-
-                # Run the container - **KEY CHANGE: use network, not network_mode**
-                new_container = docker_client.containers.run(
-                    image=CLOUDFLARED_IMAGE,
-                    command=f"tunnel --no-autoupdate run --token {token}",
-                    name=CLOUDFLARED_CONTAINER_NAME, # Use the correct variable here too
-                    network=CLOUDFLARED_NETWORK_NAME, # Connect to the bridge network
-                    restart_policy={"Name": "unless-stopped"},
-                    detach=True,
-                    remove=False, # Keep container after stop for inspection/restart
-                    # Add labels for potential self-identification? Optional.
-                    labels={"managed-by": "cloudflare-tunnel-ingress-controller"}
-                )
-                msg = f"Created and started container '{new_container.name}' on network '{CLOUDFLARED_NETWORK_NAME}'."; cloudflared_agent_state["last_action_status"] = msg; logging.info(msg); success_flag = True
-
-            except APIError as create_err:
-                # Handle case where name might be taken by a zombie container
-                if "is already in use" in str(create_err):
-                     logging.error(f"Container name '{CLOUDFLARED_ the creation block
+                      except APIError as rm_err:
+                           logging.error(f"Failed to remove misconfigured container: {rm_err}. Proceeding to create might fail.")
+                           # Decide: Abort or try creating anyway? Let's try creating.
+                      container = None # Ensure we enter the creation block
                  else:
                       # Container exists, is stopped, and seems correctly configured - just start it
                       logging.info(f"Starting existing correctly configured container '{CLOUDFLARED_CONTAINER_NAME}'..."); container.start(); msg = f"Started existing container '{CLOUDFLARED_CONTAINER_NAME}'."; cloudflared_agent_state["last_action_status"] = msg; logging.info(msg); success_flag = True
@@ -994,17 +1119,29 @@ def start_cloudflared_container():
              except (NotFound, APIError) as e:
                   logging.warning(f"Error checking existing container '{CLOUDFLARED_CONTAINER_NAME}': {e}. Assuming it needs creation.")
                   container = None # Proceed to create block
+             except requests.exceptions.ConnectionError as e:
+                  logging.error(f"Failed to connect to Docker daemon checking existing container: {e}")
+                  cloudflared_agent_state["last_action_status"] = f"Error: Docker connection failed checking agent."
+                  return False # Cannot proceed
+
 
         # Create container if it doesn't exist or needed recreation
         if not container and not success_flag: # Only create if not found or not successfully started above
-            # <<< --- THIS IS THE CORRECTED LINE --- >>>
+            # <<< --- TYPO CORRECTED HERE --- >>>
             logging.info(f"Container '{CLOUDFLARED_CONTAINER_NAME}' not found or needs creation. Creating...")
             try:
                 # Pull image first (optional, run will pull if needed but good practice)
-                try: logging.info(f"Pulling image {CLOUDFLARED_IMAGE}..."); docker_client.images.pull(CLOUDFLARED_IMAGE)
-                except APIError as img_err: logging.warning(f"Could not pull image {CLOUDFLARED_IMAGE}: {img_err}. Docker run will attempt to pull.")
+                try:
+                    logging.info(f"Pulling image {CLOUDFLARED_IMAGE}...");
+                    docker_client.images.pull(CLOUDFLARED_IMAGE)
+                except APIError as img_err:
+                    logging.warning(f"Could not pull image {CLOUDFLARED_IMAGE}: {img_err}. Docker run will attempt to pull.")
+                except requests.exceptions.ConnectionError as e: # Handle daemon down during pull
+                    logging.error(f"Failed to connect to Docker daemon during image pull: {e}")
+                    cloudflared_agent_state["last_action_status"] = f"Error: Docker connection failed pulling image."
+                    return False # Cannot proceed
 
-                # Run the container - **KEY CHANGE: use network, not network_mode**
+                # Run the container - using network, not network_mode
                 new_container = docker_client.containers.run(
                     image=CLOUDFLARED_IMAGE,
                     command=f"tunnel --no-autoupdate run --token {token}",
@@ -1013,27 +1150,9 @@ def start_cloudflared_container():
                     restart_policy={"Name": "unless-stopped"},
                     detach=True,
                     remove=False, # Keep container after stop for inspection/restart
-                    # Add labels for potential self-identification? Optional.
-                    labels={"managed-by": "cloudflare-tunnel-ingress-controller"}
+                    labels={"managed-by": "cloudflare-tunnel-ingress-controller"} # Optional label
                 )
-                msg = f"Created and started container '{new_container.name}' on network '{CLOUDFLARED_NETWORK_NAME}'."; cloudflared_agent_state["CONTAINER_NAME}' is already in use. Attempting to remove existing...") # Use correct variable
-                     try:
-                          stale_container = docker_client.containers.get(CLOUDFLARED_CONTAINER_NAME) # Use correct variable
-                          stale_container.remove(force=True)
-                          logging.info("Removed stale container. Please try starting again.")
-                          msg = f"Error: Container name conflict, removed stale container. Please retry start."
-                     except (NotFound, APIError) as rm_err:
-                          logging.error(f"Failed to remove stale container '{CLOUDFLARED_CONTAINER_NAME}': {rm_err}") # Use correct variable
-                          msg = f"Error: Docker API error creating container: {create_err} (and failed to remove stale)"
-                else:
-                     msg = f"Docker API error creating container: {create_err}"; logging.error(msg, exc_info=True)
-                cloudflared_agent_state["last_action_status"] = msg; success_flag = False
-    except APIError as e:
-        # Catch API errors from get/start/remove calls
-        msg = f"Docker API error during start sequence: {e}"; logging.error(msg, exc_info=True); cloudflared_agent_state["last_action_status"] = f"Error: {msg}"; success_flag = False
-    except Exception as e:
-        # Catch unexpected errors
-        msg = f"Unexpectedlast_action_status"] = msg; logging.info(msg); success_flag = True
+                msg = f"Created and started container '{new_container.name}' on network '{CLOUDFLARED_NETWORK_NAME}'."; cloudflared_agent_state["last_action_status"] = msg; logging.info(msg); success_flag = True
 
             except APIError as create_err:
                 # Handle case where name might be taken by a zombie container
@@ -1042,31 +1161,36 @@ def start_cloudflared_container():
                      try:
                           stale_container = docker_client.containers.get(CLOUDFLARED_CONTAINER_NAME)
                           stale_container.remove(force=True)
-                          logging.info("Removed stale container. Please try starting again.")
+                          logging.info("Removed stale container. Please try starting the agent again.")
                           msg = f"Error: Container name conflict, removed stale container. Please retry start."
-                     except (NotFound, APIError) as rm_err:
+                     except (NotFound, APIError, requests.exceptions.ConnectionError) as rm_err:
                           logging.error(f"Failed to remove stale container '{CLOUDFLARED_CONTAINER_NAME}': {rm_err}")
                           msg = f"Error: Docker API error creating container: {create_err} (and failed to remove stale)"
                 else:
                      msg = f"Docker API error creating container: {create_err}"; logging.error(msg, exc_info=True)
                 cloudflared_agent_state["last_action_status"] = msg; success_flag = False
+            except requests.exceptions.ConnectionError as e:
+                 logging.error(f"Failed to connect to Docker daemon during container run: {e}")
+                 cloudflared_agent_state["last_action_status"] = f"Error: Docker connection failed running agent."
+                 success_flag = False
+
     except APIError as e:
-        # Catch API errors from get/start/remove calls
+        # Catch API errors from get/start/remove calls outside the create block
         msg = f"Docker API error during start sequence: {e}"; logging.error(msg, exc_info=True); cloudflared_agent_state["last_action_status"] = f"Error: {msg}"; success_flag = False
+    except requests.exceptions.ConnectionError as e: # Catch connection errors early
+        msg = f"Failed to connect to Docker daemon during start sequence: {e}"; logging.error(msg); cloudflared_agent_state["last_action_status"] = f"Error: {msg}"; success_flag = False
     except Exception as e:
-        # Catch unexpected errors
+        # Catch other unexpected errors
         msg = f"Unexpected error starting container: {e}"; logging.error(msg, exc_info=True); cloudflared_agent_state["last_action_status"] = f"Error: {msg}"; success_flag = False
-    finally:
-        # Update status after a short delay to allow container error starting container: {e}"; logging.error(msg, exc_info=True); cloudflared_agent_state["last_action_status"] = f"Error: {msg}"; success_flag = False
     finally:
         # Update status after a short delay to allow container state to settle
         if docker_client:
              logging.debug("Updating container status after start attempt...")
              time.sleep(2) # Small delay
-             update_cloudflared_container_status()
+             update_cloudflared_container_status() # Update status after action
         logging.info(f"Exiting start_cloudflared_container function (Success: {success_flag}).")
         return success_flag
-        
+
 def stop_cloudflared_container():
     logging.info(f"Attempting to stop cloudflared agent container '{CLOUDFLARED_CONTAINER_NAME}'...")
     cloudflared_agent_state["last_action_status"] = "Stopping..."
@@ -1088,6 +1212,8 @@ def stop_cloudflared_container():
 
     except APIError as e:
         msg = f"Docker API error stopping container: {e}"; logging.error(msg, exc_info=True); cloudflared_agent_state["last_action_status"] = f"Error: {msg}"; success_flag = False
+    except requests.exceptions.ConnectionError as e: # Handle daemon down
+        msg = f"Failed to connect to Docker daemon stopping container: {e}"; logging.error(msg); cloudflared_agent_state["last_action_status"] = f"Error: {msg}"; success_flag = False
     except Exception as e:
         msg = f"Unexpected error stopping container: {e}"; logging.error(msg, exc_info=True); cloudflared_agent_state["last_action_status"] = f"Error: {msg}"; success_flag = False
     finally:
@@ -1112,7 +1238,8 @@ def status_page():
     update_cloudflared_container_status()
     # Create copies for rendering to avoid race conditions with background threads
     with state_lock:
-        template_rules = json.loads(json.dumps(managed_rules, default=str)) # Serialize/deserialize for safety
+        # Serialize/deserialize rules with default=str to handle datetime objects
+        template_rules = json.loads(json.dumps(managed_rules, default=str))
         template_tunnel_state = tunnel_state.copy()
         template_agent_state = cloudflared_agent_state.copy()
 
@@ -1120,7 +1247,7 @@ def status_page():
     docker_available = docker_client is not None # Pass docker availability to template
 
     # Use the existing HTML template structure
-    html_template = """<!DOCTYPE html><html><head><title>Cloudflare Tunnel Manager</title><style>body{font-family:sans-serif;padding:20px;background-color:#f4f4f4;color:#333}h1,h2,h3{color:#555}.container{background-color:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.1);margin-bottom:20px}table{width:100%;border-collapse:collapse;margin-top:15px}th,td{border:1px solid #ddd;padding:8px;text-align:left;vertical-align:top}th{background-color:#f2f2f2}td pre{margin:0;background-color:transparent;padding:0;white-space:pre-wrap;word-break:break-all; font-family: monospace; font-size: 0.9em;}.status-box{padding:10px;border:1px solid #ccc;border-radius:5px;margin-top:10px;word-wrap:break-word}.error{background-color:#ffebeb;border-color:#ffc2c2;color:#a00}.success{background-color:#e6ffed;border-color:#c3e6cb;color:#155724}.info{background-color:#e7f3fe;border-color:#b8daff;color:#004085}.warning{background-color:#fff3cd;border-color:#ffeeba;color:#856404}.status-active{color:green}.status-pending{color:orange}.button{padding:10px 15px;border:none;border-radius:4px;color:#fff;cursor:pointer;font-size:1em;margin-right:10px}.small-button{padding:5px 10px;font-size:.9em}.start-button{background-color:#28a745}.stop-button{background-color:#dc3545}.delete-button{background-color:#dc3545}.button:disabled{background-color:#ccc;cursor:not-allowed;opacity:.6}form{display:inline-block;margin:0}</style></head><body><h1>Cloudflare Tunnel Manager</h1><div class="container"><h2>Initialization Status</h2><div class="status-box {{'error' if tunnel_state.get('error') else ('success' if tunnel_state.get('token') else 'info')}}"><p><strong>Message:</strong> {{tunnel_state.status_message}}</p>{% if tunnel_state.get('error') %}<p><strong>Error Details:</strong> <pre>{{tunnel_state.error}}</pre></p>{% endif %}</div><h3>Tunnel Details</h3><p><strong>Desired Tunnel Name:</strong> <pre>{{tunnel_state.name}}</pre></p><p><strong>Tunnel ID:</strong> <pre>{{tunnel_state.id if tunnel_state.id else 'Not available'}}</pre></p><p><strong>Tunnel Token:</strong> <pre>{{display_token}}</pre></p></div><div class="container"><h2>Tunnel Agent Control (<pre>{{cloudflared_container_name}}</pre>)</h2><p><strong>Agent Container Status:</strong> <strong style="text-transform:capitalize" class="{{'success' if agent_state.container_status=='running' else ('error' if 'error' in agent_state.container_status or agent_state.container_status=='docker_unavailable' or agent_state.container_status=='dead' else ('warning' if agent_state.container_status=='exited' or agent_state.container_status=='not_found' else 'info'))}}">{{agent_state.container_status.replace('_',' ')}}</strong></p>{% if agent_state.last_action_status %}<div class="status-box {{'error' if 'Error:' in agent_state.last_action_status else ('warning' if 'Warning:' in agent_state.last_action_status else 'info')}}"><strong>Last Action Result:</strong> {{agent_state.last_action_status}}</div>{% endif %}<form action="{{url_for('start_tunnel')}}" method="post" style="margin-right:10px"><button type="submit" class="button start-button" {{'disabled' if not tunnel_state.get('token') or agent_state.container_status=='running' or not docker_available }}>Start Tunnel Agent</button></form><form action="{{url_for('stop_tunnel')}}" method="post"><button type="submit" class="button stop-button" {{'disabled' if agent_state.container_status!='running' or not docker_available }}>Stop Tunnel Agent</button></form></div><div class="container"><h2>Managed Ingress Rules</h2>{% if rules %}<table><thead><tr><th>Hostname</th><th>Service Target</th><th>Status</th><th>Managing Container ID</th><th>Delete Scheduled At (UTC)</th><th>Actions</th></tr></thead><tbody>{% for hostname, details in rules.items() %}<tr><td><pre>{{hostname}}</pre></td><td><pre>{{details.service}}</pre></td><td><strong class="{{'status-active' if details.status=='active' else 'status-pending'}}">{{details.status}}</strong></td><td><pre>{{details.container_id[:12] if details.container_id else 'N/A'}}</pre></td><td>{{details.delete_at if details.status=='pending_deletion' else 'N/A'}}</td><td><form action="{{url_for('force_delete_rule', hostname=hostname)}}" method="post" onsubmit="return confirm('Are you sure you want to force delete the rule for {{hostname}} immediately? This will update Cloudflare.');"><button type="submit" class="button delete-button small-button" {{ 'disabled' if not docker_available }}>Force Delete</button></form></td></tr>{% endfor %}</tbody></table>{% else %}<p>No ingress rules are currently being managed.</p>{% endif %}</div></body></html>"""
+    html_template = """<!DOCTYPE html><html><head><title>Cloudflare Tunnel Manager</title><meta http-equiv="refresh" content="30"> <!-- Auto-refresh page every 30 seconds --><style>body{font-family:sans-serif;padding:20px;background-color:#f4f4f4;color:#333}h1,h2,h3{color:#555}.container{background-color:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.1);margin-bottom:20px}table{width:100%;border-collapse:collapse;margin-top:15px}th,td{border:1px solid #ddd;padding:8px;text-align:left;vertical-align:top}th{background-color:#f2f2f2}td pre{margin:0;background-color:transparent;padding:0;white-space:pre-wrap;word-break:break-all; font-family: monospace; font-size: 0.9em;}.status-box{padding:10px;border:1px solid #ccc;border-radius:5px;margin-top:10px;word-wrap:break-word}.error{background-color:#ffebeb;border-color:#ffc2c2;color:#a00}.success{background-color:#e6ffed;border-color:#c3e6cb;color:#155724}.info{background-color:#e7f3fe;border-color:#b8daff;color:#004085}.warning{background-color:#fff3cd;border-color:#ffeeba;color:#856404}.status-active{color:green}.status-pending{color:orange}.button{padding:10px 15px;border:none;border-radius:4px;color:#fff;cursor:pointer;font-size:1em;margin-right:10px}.small-button{padding:5px 10px;font-size:.9em}.start-button{background-color:#28a745}.stop-button{background-color:#dc3545}.delete-button{background-color:#dc3545}.button:disabled{background-color:#ccc;cursor:not-allowed;opacity:.6}form{display:inline-block;margin:0}</style></head><body><h1>Cloudflare Tunnel Manager</h1><div class="container"><h2>Initialization Status</h2><div class="status-box {{'error' if tunnel_state.get('error') else ('success' if tunnel_state.get('token') else 'info')}}"><p><strong>Message:</strong> {{tunnel_state.status_message}}</p>{% if tunnel_state.get('error') %}<p><strong>Error Details:</strong> <pre>{{tunnel_state.error}}</pre></p>{% endif %}</div><h3>Tunnel Details</h3><p><strong>Desired Tunnel Name:</strong> <pre>{{tunnel_state.name}}</pre></p><p><strong>Tunnel ID:</strong> <pre>{{tunnel_state.id if tunnel_state.id else 'Not available'}}</pre></p><p><strong>Tunnel Token:</strong> <pre>{{display_token}}</pre></p></div><div class="container"><h2>Tunnel Agent Control (<pre>{{cloudflared_container_name}}</pre>)</h2><p><strong>Agent Container Status:</strong> <strong style="text-transform:capitalize" class="{{'success' if agent_state.container_status=='running' else ('error' if 'error' in agent_state.container_status or agent_state.container_status=='docker_unavailable' or agent_state.container_status=='dead' else ('warning' if agent_state.container_status=='exited' or agent_state.container_status=='not_found' else 'info'))}}">{{agent_state.container_status.replace('_',' ')}}</strong></p>{% if agent_state.last_action_status %}<div class="status-box {{'error' if 'Error:' in agent_state.last_action_status else ('warning' if 'Warning:' in agent_state.last_action_status else 'info')}}"><strong>Last Action Result:</strong> {{agent_state.last_action_status}}</div>{% endif %}<form action="{{url_for('start_tunnel')}}" method="post" style="margin-right:10px"><button type="submit" class="button start-button" {{'disabled' if not tunnel_state.get('token') or agent_state.container_status=='running' or not docker_available }}>Start Tunnel Agent</button></form><form action="{{url_for('stop_tunnel')}}" method="post"><button type="submit" class="button stop-button" {{'disabled' if agent_state.container_status!='running' or not docker_available }}>Stop Tunnel Agent</button></form></div><div class="container"><h2>Managed Ingress Rules</h2>{% if rules %}<table><thead><tr><th>Hostname</th><th>Service Target</th><th>Status</th><th>Managing Container ID</th><th>Delete Scheduled At (UTC)</th><th>Actions</th></tr></thead><tbody>{% for hostname, details in rules.items() %}<tr><td><pre>{{hostname}}</pre></td><td><pre>{{details.service}}</pre></td><td><strong class="{{'status-active' if details.status=='active' else 'status-pending'}}">{{details.status}}</strong></td><td><pre>{{details.container_id[:12] if details.container_id else 'N/A'}}</pre></td><td>{{details.delete_at if details.status=='pending_deletion' else 'N/A'}}</td><td><form action="{{url_for('force_delete_rule', hostname=hostname)}}" method="post" onsubmit="return confirm('Are you sure you want to force delete the rule for {{hostname}} immediately? This will update Cloudflare.');"><button type="submit" class="button delete-button small-button" {{ 'disabled' if not docker_available }}>Force Delete</button></form></td></tr>{% endfor %}</tbody></table>{% else %}<p>No ingress rules are currently being managed.</p>{% endif %}</div></body></html>"""
     return render_template_string(html_template,
                                 tunnel_state=template_tunnel_state,
                                 agent_state=template_agent_state,
@@ -1134,19 +1261,21 @@ def status_page():
 def start_tunnel():
     logging.info("Received request to start tunnel agent via UI.")
     start_cloudflared_container()
+    # Add a small delay before redirecting to allow status update to potentially happen
+    time.sleep(1)
     return redirect(url_for('status_page'))
 
 @app.route('/stop', methods=['POST'])
 def stop_tunnel():
     logging.info("Received request to stop tunnel agent via UI.")
     stop_cloudflared_container()
+    time.sleep(1)
     return redirect(url_for('status_page'))
 
 @app.route('/force_delete/<hostname>', methods=['POST'])
 def force_delete_rule(hostname):
     logging.info(f"Received request to force delete rule for hostname: {hostname}")
     state_changed = False
-    update_triggered = False
 
     with state_lock:
         if hostname in managed_rules:
@@ -1174,7 +1303,25 @@ def force_delete_rule(hostname):
             cloudflared_agent_state["last_action_status"] = f"Error: Removed {hostname} locally, but FAILED pushing update to Cloudflare! Reconciliation needed."
             # Tunnel state might contain a more specific error from the update attempt.
 
+    time.sleep(1) # Allow time for potential status updates
     return redirect(url_for('status_page'))
+
+
+# --- Background Task Runner ---
+def run_background_tasks():
+    """Starts and manages background threads."""
+    if not docker_client or not tunnel_state.get("id"):
+        logging.warning("Docker client or Tunnel not ready. Background tasks will not start.")
+        return None, None # Return None for threads
+
+    logging.info("Starting background threads for Docker events and rule cleanup.")
+    event_thread = threading.Thread(target=docker_event_listener, name="DockerEventListener", daemon=True)
+    cleanup_thread = threading.Thread(target=cleanup_expired_rules, name="CleanupTask", daemon=True)
+
+    event_thread.start()
+    cleanup_thread.start()
+    logging.info("Background threads started.")
+    return event_thread, cleanup_thread
 
 
 # --- Main Execution ---
@@ -1185,74 +1332,52 @@ if __name__ == '__main__':
 
     # Load initial state from file
     load_state()
-    logging.info("State loading complete.")
+    logging.info("Initial state loading complete.")
 
-    # Ensure Docker is available before proceeding with Docker-dependent steps
+    # Initialize background thread handles
+    event_thread = None
+    cleanup_thread = None
+
+    # Check Docker client availability first
     if not docker_client:
-         logging.error("Docker client is unavailable. Limited functionality.")
-         # Update state to reflect this issue
+         logging.error("Docker client is unavailable at startup. Limited functionality.")
          tunnel_state["status_message"] = "Error: Docker client unavailable."
          tunnel_state["error"] = "Failed to connect to Docker daemon. Check socket mount and permissions."
          cloudflared_agent_state["container_status"] = "docker_unavailable"
-         # Run Flask app to show error UI, but skip Docker-related tasks
-         logging.warning("Skipping tunnel initialization, reconciliation, agent management, and background tasks due to Docker client unavailability.")
+         logging.warning("Skipping tunnel initialization, reconciliation, agent management, and background tasks.")
     else:
          # --- Docker client is available, proceed ---
          logging.info("Docker client available.")
 
          # Ensure the cloudflared network exists early on
          logging.info(f"Ensuring Docker network '{CLOUDFLARED_NETWORK_NAME}' exists...")
-         ensure_docker_network_exists(CLOUDFLARED_NETWORK_NAME) # Best effort, continue even if it fails here
+         ensure_docker_network_exists(CLOUDFLARED_NETWORK_NAME) # Best effort
 
          # Initialize the Cloudflare Tunnel itself via API
-         try:
-             initialize_tunnel()
-         except Exception as init_err:
-             # Catch unexpected errors during initialization itself
-             logging.error(f"Unhandled exception during initialize_tunnel call: {init_err}", exc_info=True)
-             if not tunnel_state.get("error"): # Set generic error if none was set
-                 tunnel_state["error"] = f"Unexpected error during init: {init_err}"
-             tunnel_state["status_message"] = "Tunnel initialization failed unexpectedly."
+         initialize_tunnel() # This function now handles its own errors and updates tunnel_state
 
          logging.info(f"Tunnel initialization process complete. Status: {tunnel_state.get('status_message')}")
-         logging.info(f"Tunnel State: ID={tunnel_state.get('id')}, Token Present={bool(tunnel_state.get('token'))}, Error={tunnel_state.get('error')}")
+         logging.debug(f"Tunnel State after init: ID={tunnel_state.get('id')}, Token Present={bool(tunnel_state.get('token'))}, Error={tunnel_state.get('error')}")
 
          # Only proceed with reconciliation and agent start if tunnel is fully set up
          if tunnel_state.get("id") and tunnel_state.get("token"):
-             logging.info("Tunnel appears initialized successfully. Proceeding with reconciliation and agent checks.")
+             logging.info("Tunnel initialized successfully. Proceeding with reconciliation and agent checks.")
 
              # Run initial reconciliation
-             try:
-                 reconcile_state()
-                 logging.info("Initial state reconciliation complete.")
-             except Exception as recon_err:
-                 logging.error(f"Error during initial reconciliation: {recon_err}", exc_info=True)
-                 cloudflared_agent_state["last_action_status"] = f"Error during initial reconcile: {recon_err}"
+             reconcile_state() # Handles its own errors internally
+             logging.info("Initial state reconciliation complete.")
 
              # Attempt to start the cloudflared agent container if not running
              logging.info("Checking and attempting to automatically start tunnel agent container if needed...")
              update_cloudflared_container_status() # Get current status first
              if cloudflared_agent_state.get("container_status") != 'running':
                  logging.info("Agent container not running, attempting start...")
-                 agent_started_ok = False
-                 try:
-                     agent_started_ok = start_cloudflared_container()
-                 except Exception as start_err:
-                     logging.error(f"Unhandled exception calling start_cloudflared_container: {start_err}", exc_info=True)
-                     cloudflared_agent_state["last_action_status"] = f"Error: Unhandled exception during start ({start_err})"
-                 if agent_started_ok:
-                     logging.info("Call to start_cloudflared_container returned success.")
-                 else:
-                     logging.warning("Call to start_cloudflared_container returned failure. Check logs and agent status.")
+                 start_cloudflared_container() # Handles errors internally, updates agent_state
              else:
                  logging.info("Agent container already running.")
 
              # Start background tasks ONLY if Docker is available and tunnel is initialized
-             logging.info("Starting background threads for Docker events and rule cleanup.")
-             event_thread = threading.Thread(target=docker_event_listener, name="DockerEventListener", daemon=True)
-             cleanup_thread = threading.Thread(target=cleanup_expired_rules, name="CleanupTask", daemon=True)
-             event_thread.start()
-             cleanup_thread.start()
+             event_thread, cleanup_thread = run_background_tasks()
 
          else:
              logging.warning("Tunnel not fully initialized (missing ID or Token). Skipping reconciliation, agent start, and background tasks.")
@@ -1262,20 +1387,59 @@ if __name__ == '__main__':
 
     # Start the Flask web server regardless of initialization success to show status/errors
     logging.info("Starting Flask application web server on 0.0.0.0:5000...")
+    flask_thread = None
     try:
-        # Use waitress or gunicorn in production instead of Flask dev server
-        app.run(host='0.0.0.0', port=5000, use_reloader=False, threaded=True)
-    except Exception as flask_err:
-        logging.error(f"Flask server encountered a fatal error: {flask_err}", exc_info=True)
+        # Running Flask's development server (use_reloader=False is important!)
+        # For production, consider waitress or gunicorn
+        # app.run(host='0.0.0.0', port=5000, use_reloader=False, threaded=True)
 
-    # --- Cleanup ---
-    logging.info("Flask app stopping or encountered error...")
-    # Signal background threads to stop
-    stop_event.set()
-    logging.info("Stop event set for background threads.")
+        # Alternative: Use waitress for a more production-ready server
+        from waitress import serve
+        flask_thread = threading.Thread(target=serve, args=(app,), kwargs={'host':'0.0.0.0','port':5000}, daemon=True, name="FlaskWaitressServer")
+        flask_thread.start()
+        logging.info("Flask server started using waitress in a background thread.")
 
-    # Optional: Wait briefly for threads to exit? (Daemon threads exit automatically)
-    # time.sleep(1)
+        # Keep the main thread alive to wait for signals or thread completion
+        while True:
+             # Check if background threads are still running (if they were started)
+             all_threads_alive = True
+             if flask_thread and not flask_thread.is_alive():
+                  logging.error("Flask server thread terminated unexpectedly.")
+                  all_threads_alive = False
+             if event_thread and not event_thread.is_alive():
+                  logging.warning("Docker event listener thread terminated unexpectedly.")
+                  # Attempt to restart? Or just log and continue?
+                  # event_thread, cleanup_thread = run_background_tasks() # Simple restart attempt
+             if cleanup_thread and not cleanup_thread.is_alive():
+                  logging.warning("Cleanup thread terminated unexpectedly.")
+                  # Attempt to restart?
+             if not all_threads_alive:
+                  stop_event.set() # Signal other threads to stop if one died
+                  break
+             time.sleep(10) # Check periodically
 
-    logging.info("Exiting Cloudflare Tunnel Ingress Manager application.")
-    sys.exit(0 if not tunnel_state.get("error") else 1) # Exit code based on tunnel status?
+    except KeyboardInterrupt:
+         logging.info("KeyboardInterrupt received.")
+    except Exception as server_err:
+        logging.error(f"Web server encountered a fatal error: {server_err}", exc_info=True)
+    finally:
+        # --- Cleanup ---
+        logging.info("Shutdown sequence initiated...")
+        # Signal background threads to stop
+        stop_event.set()
+        logging.info("Stop event set for background threads.")
+
+        # Wait briefly for threads to exit gracefully (optional, daemons will exit anyway)
+        # if event_thread and event_thread.is_alive():
+        #      logging.info("Waiting for event thread to stop...")
+        #      event_thread.join(timeout=5)
+        # if cleanup_thread and cleanup_thread.is_alive():
+        #      logging.info("Waiting for cleanup thread to stop...")
+        #      cleanup_thread.join(timeout=5)
+        # Flask thread (if using waitress in thread) is daemon, will exit
+
+        logging.info("Exiting Cloudflare Tunnel Ingress Manager application.")
+        exit_code = 0
+        if tunnel_state.get("error") or cloudflared_agent_state.get("container_status") == "docker_unavailable":
+             exit_code = 1 # Exit with error code if setup failed
+        sys.exit(exit_code)

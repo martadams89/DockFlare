@@ -1,4 +1,6 @@
-Flask>=2.0
-python-dotenv>=0.19
+# requirements.txt
 requests
 docker
+python-dotenv
+Flask
+waitress # Added for production server
