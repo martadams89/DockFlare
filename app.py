@@ -34,6 +34,8 @@ CF_HEADERS = {
     "Authorization": f"Bearer {CF_API_TOKEN}",
     "Content-Type": "application/json",
 }
+# ADDED DEBUG LOGGING HERE
+logging.info(f"[DEBUG] CF_HEADERS created: Authorization Header starts with 'Bearer {str(CF_API_TOKEN)[:5]}...'")
 
 # App Config
 LABEL_PREFIX = os.getenv('LABEL_PREFIX', 'cloudflare.tunnel')
@@ -142,8 +144,14 @@ def cf_api_request(method, endpoint, json_data=None, params=None):
     url = f"{CF_API_BASE_URL}{endpoint}"
     error_msg = None
     try:
+        # Use a copy of headers to avoid potential modification issues if needed elsewhere
+        # Although in this case, CF_HEADERS is constant after init
+        request_headers = CF_HEADERS.copy()
         logging.info(f"API Request: {method} {url} Params: {params} Data: {json_data}")
-        response = requests.request(method, url, headers=CF_HEADERS, json=json_data, params=params, timeout=30)
+        # Log the start of the auth header for verification, avoiding full token log
+        # logging.debug(f"Auth Header starts with: {request_headers.get('Authorization', 'N/A')[:15]}")
+
+        response = requests.request(method, url, headers=request_headers, json=json_data, params=params, timeout=30)
         response.raise_for_status()
         logging.info(f"API Response Status: {response.status_code}")
 
@@ -207,130 +215,141 @@ def cf_api_request(method, endpoint, json_data=None, params=None):
 
 # --- find_tunnel_via_api ---
 def find_tunnel_via_api(name):
+    logging.info(f"[DEBUG] Entering find_tunnel_via_api for '{name}'")
     endpoint = f"/accounts/{CF_ACCOUNT_ID}/cfd_tunnel"
     params = {"name": name, "is_deleted": "false"}
     try:
         response_data = cf_api_request("GET", endpoint, params=params)
         tunnels = response_data.get("result", [])
         if tunnels and isinstance(tunnels, list):
-            # Found the tunnel
             tunnel = tunnels[0]
             tunnel_id = tunnel.get("id")
             if tunnel_id:
                 logging.info(f"Found existing tunnel '{name}' with ID: {tunnel_id} via API.")
-                # Now get the token separately
                 token = get_tunnel_token_via_api(tunnel_id)
+                logging.info(f"[DEBUG] Exiting find_tunnel_via_api for '{name}' - Found ID and got Token: {bool(token)}")
                 return tunnel_id, token
             else:
-                 # Should not happen, but good to log
                  logging.warning(f"Found tunnel entry for '{name}' but it has no ID in API response: {tunnel}")
+                 logging.info(f"[DEBUG] Exiting find_tunnel_via_api for '{name}' - Found but no ID")
                  return None, None
         else:
-            # Tunnel not found
             logging.info(f"Tunnel '{name}' not found via API.")
+            logging.info(f"[DEBUG] Exiting find_tunnel_via_api for '{name}' - Not found")
             return None, None
     except requests.exceptions.RequestException as e:
         logging.error(f"API error finding tunnel '{name}': {e}")
-        # Populate error state if not already set by cf_api_request
-        # if not tunnel_state.get("error"): tunnel_state["error"] = f"API error finding tunnel: {e}"
+        logging.info(f"[DEBUG] Exiting find_tunnel_via_api for '{name}' - RequestException: {e}")
         return None, None
-    except Exception as e: # Catch unexpected errors
+    except Exception as e:
         logging.error(f"Unexpected error finding tunnel '{name}': {e}", exc_info=True)
         tunnel_state["error"] = f"Unexpected error finding tunnel: {e}"
+        logging.info(f"[DEBUG] Exiting find_tunnel_via_api for '{name}' - Unexpected Exception: {e}")
         return None, None
 
 
 # --- get_tunnel_token_via_api ---
 def get_tunnel_token_via_api(tunnel_id):
+    logging.info(f"[DEBUG] Entering get_tunnel_token_via_api for ID '{tunnel_id}'")
     endpoint = f"/accounts/{CF_ACCOUNT_ID}/cfd_tunnel/{tunnel_id}/token"
-    url = f"{CF_API_BASE_URL}{endpoint}" # Construct full URL for logging
+    url = f"{CF_API_BASE_URL}{endpoint}"
     try:
-        # Use requests directly here as cf_api_request expects JSON response, but token is text
+        request_headers = {"Authorization": f"Bearer {CF_API_TOKEN}"} # Ensure correct header is used
         logging.info(f"API Request: GET {url} (for token)")
-        response = requests.request("GET", url, headers={"Authorization": f"Bearer {CF_API_TOKEN}"}, timeout=30)
-        response.raise_for_status() # Check for HTTP errors
-        token = response.text.strip() # Get token from response body
-        # Basic validation
-        if not token or len(token) < 50: # Example minimum length, adjust if needed
+        # logging.debug(f"Auth Header starts with: {request_headers.get('Authorization', 'N/A')[:15]}")
+        response = requests.request("GET", url, headers=request_headers, timeout=30)
+        response.raise_for_status()
+        token = response.text.strip()
+        if not token or len(token) < 50:
             logging.error(f"Retrieved token for tunnel {tunnel_id} appears invalid (too short or empty).")
+            logging.info(f"[DEBUG] Exiting get_tunnel_token_via_api for ID '{tunnel_id}' - Invalid Token Format")
             raise ValueError("Invalid token format received from API")
         logging.info(f"Successfully retrieved token via API for tunnel {tunnel_id}")
+        logging.info(f"[DEBUG] Exiting get_tunnel_token_via_api for ID '{tunnel_id}' - Success")
         return token
     except requests.exceptions.RequestException as e:
-        # Log specific error details
         error_msg = f"API Error getting token for tunnel {tunnel_id}: {e}"
         if e.response is not None:
              error_msg += f" Status: {e.response.status_code} Body: {e.response.text[:100]}"
         logging.error(error_msg)
-        tunnel_state["error"] = error_msg # Update global state error
-        raise # Re-raise to signal failure
-    except Exception as e: # Catch unexpected errors
+        tunnel_state["error"] = error_msg
+        logging.info(f"[DEBUG] Exiting get_tunnel_token_via_api for ID '{tunnel_id}' - RequestException: {e}")
+        raise
+    except Exception as e:
          logging.error(f"Unexpected error getting tunnel token for {tunnel_id}: {e}", exc_info=True)
          tunnel_state["error"] = f"Unexpected error getting token: {e}"
+         logging.info(f"[DEBUG] Exiting get_tunnel_token_via_api for ID '{tunnel_id}' - Unexpected Exception: {e}")
          raise
 
 
 # --- create_tunnel_via_api ---
 def create_tunnel_via_api(name):
+    logging.info(f"[DEBUG] Entering create_tunnel_via_api for '{name}'")
     endpoint = f"/accounts/{CF_ACCOUNT_ID}/cfd_tunnel"
-    payload = {"name": name, "config_src": "cloudflare"} # 'cloudflare' means managed via API/Dashboard
+    payload = {"name": name, "config_src": "cloudflare"}
     try:
         response_data = cf_api_request("POST", endpoint, json_data=payload)
         result = response_data.get("result", {})
         tunnel_id = result.get("id")
-        token = result.get("token") # Creation response includes the token
+        token = result.get("token")
         if not tunnel_id or not token:
             logging.error(f"API response for tunnel creation missing ID or Token: {result}")
+            logging.info(f"[DEBUG] Exiting create_tunnel_via_api for '{name}' - Missing ID/Token in response")
             raise ValueError("Missing ID or Token in API response for tunnel creation")
         logging.info(f"Successfully created tunnel '{name}' with ID {tunnel_id} via API.")
+        logging.info(f"[DEBUG] Exiting create_tunnel_via_api for '{name}' - Success")
         return tunnel_id, token
     except requests.exceptions.RequestException as e:
         logging.error(f"API error creating tunnel '{name}': {e}")
-        # Populate error state if not already set by cf_api_request
-        # if not tunnel_state.get("error"): tunnel_state["error"] = f"API error creating tunnel: {e}"
+        logging.info(f"[DEBUG] Exiting create_tunnel_via_api for '{name}' - RequestException: {e}")
         return None, None
-    except Exception as e: # Catch unexpected errors
+    except Exception as e:
         logging.error(f"Unexpected error creating tunnel '{name}': {e}", exc_info=True)
         tunnel_state["error"] = f"Unexpected error creating tunnel: {e}"
+        logging.info(f"[DEBUG] Exiting create_tunnel_via_api for '{name}' - Unexpected Exception: {e}")
         return None, None
 
 
 # --- initialize_tunnel ---
 def initialize_tunnel():
+    logging.info("[DEBUG] Entering initialize_tunnel")
     tunnel_state["status_message"] = f"Checking for tunnel '{TUNNEL_NAME}' via API..."
-    tunnel_state["error"] = None # Clear previous errors
+    tunnel_state["error"] = None
     tunnel_id = None
     token = None
     try:
-        # Attempt to find the tunnel first
+        logging.info("[DEBUG] Calling find_tunnel_via_api...")
         tunnel_id, token = find_tunnel_via_api(TUNNEL_NAME)
+        logging.info(f"[DEBUG] find_tunnel_via_api returned: ID={tunnel_id}, Token Present={bool(token)}")
 
-        if not tunnel_id and not tunnel_state.get("error"): # Only try creating if find didn't error
-            # Tunnel doesn't exist, try creating it
+        if not tunnel_id and not tunnel_state.get("error"):
             tunnel_state["status_message"] = f"Tunnel '{TUNNEL_NAME}' not found. Creating via API..."
+            logging.info("[DEBUG] Calling create_tunnel_via_api...")
             tunnel_id, token = create_tunnel_via_api(TUNNEL_NAME)
+            logging.info(f"[DEBUG] create_tunnel_via_api returned: ID={tunnel_id}, Token Present={bool(token)}")
 
-        # Final check if we have both ID and Token
+        # Final check
         if tunnel_id and token:
             tunnel_state["id"] = tunnel_id
             tunnel_state["token"] = token
             tunnel_state["status_message"] = "Tunnel setup complete (using API)."
-            tunnel_state["error"] = None # Clear any transient find/create errors if we ended up succeeding
+            tunnel_state["error"] = None
             logging.info(f"Tunnel '{TUNNEL_NAME}' initialized successfully. ID: {tunnel_id}, Token retrieved.")
-        elif not tunnel_state.get("error"): # If we failed but no specific error was already recorded
+        elif not tunnel_state.get("error"):
              tunnel_state["status_message"] = "Tunnel initialization failed."
              tunnel_state["error"] = "Failed to find/create tunnel or retrieve token. Check logs."
              logging.error(f"Tunnel initialization failed for '{TUNNEL_NAME}'. Could not get ID and Token.")
-        else: # An error was already recorded during find/create/token retrieval
+        else:
              tunnel_state["status_message"] = "Tunnel initialization failed (see error details)."
              logging.error(f"Tunnel initialization failed for '{TUNNEL_NAME}' due to API error: {tunnel_state['error']}")
+        logging.info(f"[DEBUG] Exiting initialize_tunnel - Final State: ID={tunnel_state.get('id')}, Token Present={bool(tunnel_state.get('token'))}, Error={tunnel_state.get('error')}")
 
     except Exception as e:
-        # Catch any unexpected errors during the initialization flow
         logging.error(f"Unhandled exception during tunnel initialization: {e}", exc_info=True)
-        if not tunnel_state.get("error"): # Avoid overwriting specific API errors
+        if not tunnel_state.get("error"):
             tunnel_state["error"] = f"Initialization failed unexpectedly: {e}"
         tunnel_state["status_message"] = "Tunnel initialization failed (unexpected error)."
+        logging.info(f"[DEBUG] Exiting initialize_tunnel - Unhandled Exception: {e}")
 
 
 # --- get_current_cf_config ---
@@ -1745,6 +1764,8 @@ if __name__ == '__main__':
          ensure_docker_network_exists(CLOUDFLARED_NETWORK_NAME) # Log errors inside function
 
          # Initialize Cloudflare Tunnel (find or create, get token)
+         # ADDED DEBUG LOGGING HERE
+         logging.info("[DEBUG] >>> About to call initialize_tunnel()...")
          initialize_tunnel()
          logging.info(f"Tunnel initialization process complete. Status: {tunnel_state.get('status_message')}")
          logging.debug(f"Tunnel State after init: ID={tunnel_state.get('id')}, Token Present={bool(tunnel_state.get('token'))}, Error={tunnel_state.get('error')}")
