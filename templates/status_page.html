@@ -197,7 +197,7 @@
             </p>
             {% if agent_state.last_action_status %}
                 <!-- Apply status class directly to the box based on keywords -->
-                <div class="status-box {{ 'error' if 'Error:' in agent_state.last_action_status or 'Failed' in agent_state.last_action_status else ('warning' if 'Warning:' in agent_state.last_action_status else 'info') }}">
+                <div class="status-box {{ 'error' if 'Error:' in agent_state.last_action_status or 'Failed' in agent_state.last_action_status or 'FAILED' in agent_state.last_action_status else ('warning' if 'Warning:' in agent_state.last_action_status else 'info') }}">
                     <p><strong>Last Action Result:</strong> {{ agent_state.last_action_status }}</p>
                 </div>
             {% endif %}
@@ -257,36 +257,16 @@
                                     N/A
                                     {% endif %}
                                 </td>
+                                <!-- *** CORRECTED TIMESTAMP DISPLAY *** -->
                                 <td style="min-width: 150px;"> {# Give date column some minimum width #}
                                     {% if details.status=='pending_deletion' and details.delete_at %}
-                                        {# Assuming details.delete_at is an ISO string like 'YYYY-MM-DDTHH:MM:SSZ' #}
-                                        {% set dt_str = details.delete_at | string %}
-                                        {% set dt_obj = None %}
-                                        {% if dt_str %}
-                                            {% set formats_to_try = ['%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%d %H:%M:%S.%f%z'] %}
-                                            {% for fmt in formats_to_try %}
-                                                {% if dt_obj is none %} {# Only try if not already parsed #}
-                                                    {% Try parsing. Use 'none' as default to avoid error propagation #}
-                                                    {% set parsed_dt = dt_str | strptime(fmt, default=none) %}
-                                                    {% if parsed_dt %}
-                                                        {% set dt_obj = parsed_dt %}
-                                                    {% endif %}
-                                                {% endif %}
-                                            {% endfor %}
-                                        {% endif %}
-
-                                        {% if dt_obj %}
-                                             <span title="{{ dt_str }}">{{ dt_obj.strftime('%H:%M:%S %d-%b-%Y') }}</span>
-                                        {% elif dt_str %}
-                                            {# Fallback to raw string if parsing failed #}
-                                            <span title="Could not parse date"><em>{{ dt_str }}</em></span>
-                                        {% else %}
-                                            N/A
-                                        {% endif %}
+                                        {# Display the raw ISO string passed from app.py #}
+                                        <span title="Scheduled Deletion Time (UTC): {{ details.delete_at }}">{{ details.delete_at }}</span>
                                     {% else %}
                                         N/A
                                     {% endif %}
                                 </td>
+                                <!-- *** END CORRECTION *** -->
                                 <td>
                                     <form action="{{ url_for('force_delete_rule', hostname=hostname) }}" method="post"
                                           onsubmit="return confirm('Are you sure you want to force delete the rule and DNS record for \'{{ hostname }}\' immediately? This bypasses the grace period.');">
