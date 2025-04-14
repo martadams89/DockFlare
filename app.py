@@ -236,15 +236,41 @@ def get_current_cf_config():
     """Fetches the current tunnel configuration from Cloudflare."""
     if not tunnel_state.get("id"):
         logging.warning("Cannot get CF config, tunnel ID not available.")
-        return None
+        return None # Return None if no ID
+
     endpoint = f"/accounts/{CF_ACCOUNT_ID}/cfd_tunnel/{tunnel_state['id']}/configurations"
     try:
-        response = cf_api_request("GET", endpoint)
-        # The config is nested under 'result' -> 'config'
-        return response.get("result", {}).get("config", {})
+        # Use the main helper which includes detailed logging
+        response_data = cf_api_request("GET", endpoint)
+
+        # Check if the response structure is as expected
+        if response_data and isinstance(response_data, dict) and response_data.get("success"):
+            result_data = response_data.get("result")
+            if isinstance(result_data, dict):
+                 config_data = result_data.get("config")
+                 if isinstance(config_data, dict):
+                     logging.debug(f"Successfully fetched and parsed config: {config_data}")
+                     return config_data # Return the actual config dict
+                 else:
+                      logging.warning(f"API response has 'result' but no 'config' dictionary inside. Response: {response_data}")
+                      return {} # Return empty dict if config is missing (e.g., never set)
+            else:
+                 logging.warning(f"API response has 'success:true' but no 'result' dictionary. Response: {response_data}")
+                 return {} # Return empty dict if result is missing
+        elif response_data: # If success wasn't explicitly true or format is weird
+             logging.warning(f"API response format unexpected or success flag not true. Response: {response_data}")
+             return {} # Treat as empty/invalid config
+        else: # Should not happen if cf_api_request works, but defensively handle None response
+             logging.error("cf_api_request returned None unexpectedly for GET config.")
+             return None
+
     except Exception as e:
-        logging.error(f"Failed to get current tunnel config from Cloudflare: {e}")
-        return None # Return None on failure
+        # Log the specific exception caught within this function
+        logging.error(f"Exception caught in get_current_cf_config: {e}", exc_info=True)
+        # Ensure tunnel_state error reflects this failure if not already set by cf_api_request
+        if not tunnel_state.get("error") or "API Error" not in tunnel_state["error"]:
+             tunnel_state["error"] = f"Failed to get/parse tunnel config: {e}"
+        return None # Return None on any exception
 
 def update_cloudflare_config():
     """
