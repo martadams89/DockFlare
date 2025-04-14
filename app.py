@@ -1630,6 +1630,7 @@ def reconcile_state():
 
 def get_cloudflared_container():
     """Gets the Docker container object for the cloudflared agent."""
+    global docker_client # <--- ADDED at the top
     if not docker_client:
         logging.warning("Docker client unavailable, cannot get agent container.")
         # Update state if Docker was previously available
@@ -1659,7 +1660,7 @@ def get_cloudflared_container():
         cloudflared_agent_state["container_status"] = "docker_unavailable"
         cloudflared_agent_state["last_action_status"] = "Error: Lost connection to Docker."
         # Set docker_client to None to prevent further attempts until reconnected
-        global docker_client
+        # global docker_client # Already declared at the top
         docker_client = None
         return None
     except Exception as e:
@@ -1668,15 +1669,14 @@ def get_cloudflared_container():
         cloudflared_agent_state["last_action_status"] = f"Error: Unexpected error getting agent: {e}"
         cloudflared_agent_state["container_status"] = "unknown"
         return None
-
 def update_cloudflared_container_status():
     """Updates the global state with the current status of the agent container."""
-    global docker_client # Allow potentially resetting docker_client if connection lost
+    global docker_client # <--- MOVED to the top
     if not docker_client:
         # Attempt to reconnect if client is None
         logging.debug("Docker client unavailable, attempting reconnect for status update...")
         try:
-            docker_client = docker.from_env(timeout=5)
+            docker_client = docker.from_env(timeout=5) # Assigning here
             docker_client.ping()
             logging.info("Reconnected to Docker daemon for status update.")
             # If reconnected, proceed to get container status
@@ -1686,10 +1686,11 @@ def update_cloudflared_container_status():
             if cloudflared_agent_state["container_status"] != "docker_unavailable":
                  cloudflared_agent_state["container_status"] = "docker_unavailable"
                  cloudflared_agent_state["last_action_status"] = "Error: Lost connection to Docker."
-            docker_client = None # Ensure it remains None
+            docker_client = None # Assigning here
             return # Cannot update status without connection
 
     # --- Get container and update status ---
+    # Call relies on docker_client potentially being updated above
     container = get_cloudflared_container() # This handles errors and updates status if unavailable/not found
 
     if container:
@@ -1718,18 +1719,18 @@ def update_cloudflared_container_status():
              logging.error(f"Docker connection error updating agent status: {e}")
              cloudflared_agent_state["container_status"] = "docker_unavailable"
              cloudflared_agent_state["last_action_status"] = "Error: Lost connection to Docker."
-             docker_client = None # Mark client as unusable
+             docker_client = None # Assigning here
         except Exception as e:
              logging.error(f"Unexpected error reloading agent container status: {e}", exc_info=True)
              cloudflared_agent_state["container_status"] = "unknown" # Mark as unknown due to error
-    else: # <-- CORRECTED INDENTATION for the 'else' block
+    else:
         # container is None
         # get_cloudflared_container already updated the status (not_found or docker_unavailable)
         logging.debug("Agent container not found or Docker unavailable during status update.")
-        pass # <-- CORRECTED INDENTATION for 'pass' under the 'else'
-        
+        pass
 def ensure_docker_network_exists(network_name):
      """Checks if the specified Docker network exists, creates it if not."""
+     global docker_client # <--- ADDED at the top
      if not docker_client:
          logging.error(f"Docker client unavailable, cannot check or create network '{network_name}'.")
          return False
@@ -1769,7 +1770,7 @@ def ensure_docker_network_exists(network_name):
      except requests.exceptions.ConnectionError as e:
          logging.error(f"Docker connection error checking network '{network_name}': {e}")
          cloudflared_agent_state["last_action_status"] = f"Error: Docker connection lost checking network."
-         global docker_client
+         # global docker_client # Already declared
          docker_client = None # Mark as unavailable
          return False
      except Exception as e:
@@ -1777,9 +1778,9 @@ def ensure_docker_network_exists(network_name):
           cloudflared_agent_state["last_action_status"] = f"Error checking network '{network_name}': {e}"
           return False
 
-
 def start_cloudflared_container():
     """Starts the cloudflared agent container if not already running."""
+    global docker_client # <--- ADDED at the top
     logging.info(f"Attempting to start agent container '{CLOUDFLARED_CONTAINER_NAME}'...")
     cloudflared_agent_state["last_action_status"] = "Starting agent..."
     start_successful = False
@@ -1844,6 +1845,8 @@ def start_cloudflared_container():
                       except (APIError, requests.exceptions.ConnectionError) as rm_err:
                           logging.error(f"Failed to remove misconfigured/stopped container '{CLOUDFLARED_CONTAINER_NAME}': {rm_err}. Start aborted.")
                           cloudflared_agent_state["last_action_status"] = f"Error: Failed remove old agent: {rm_err}"
+                          if isinstance(rm_err, requests.exceptions.ConnectionError):
+                              docker_client = None # Mark as unavailable
                           return False # Abort start if removal fails
                  else:
                       # Container exists, is stopped, and config seems okay - try starting it
@@ -1863,7 +1866,7 @@ def start_cloudflared_container():
                  # Handle connection error during check
                  logging.error(f"Docker connection error checking existing container: {e}")
                  cloudflared_agent_state["last_action_status"] = f"Error: Docker connection lost checking agent."
-                 global docker_client
+                 # global docker_client # Already declared
                  docker_client = None # Mark unusable
                  return False
 
@@ -1882,7 +1885,7 @@ def start_cloudflared_container():
                 except requests.exceptions.ConnectionError as e:
                     logging.error(f"Docker connection failed during image pull: {e}")
                     cloudflared_agent_state["last_action_status"] = f"Error: Docker connection lost pulling image."
-                    global docker_client
+                    # global docker_client # Already declared
                     docker_client = None
                     return False
 
@@ -1922,7 +1925,7 @@ def start_cloudflared_container():
                 # Handle connection error during run
                 logging.error(f"Docker connection failed running container: {e}")
                 cloudflared_agent_state["last_action_status"] = f"Error: Docker connection lost running agent."
-                global docker_client
+                # global docker_client # Already declared
                 docker_client = None
                 start_successful = False
             except Exception as e:
@@ -1947,9 +1950,9 @@ def start_cloudflared_container():
         logging.info(f"Exiting start_cloudflared_container function (Success: {start_successful}).")
         return start_successful
 
-
 def stop_cloudflared_container():
     """Stops the cloudflared agent container if it's running."""
+    global docker_client # <--- ADDED at the top
     logging.info(f"Attempting to stop agent container '{CLOUDFLARED_CONTAINER_NAME}'...")
     cloudflared_agent_state["last_action_status"] = "Stopping agent..."
     stop_successful = False
@@ -2003,7 +2006,7 @@ def stop_cloudflared_container():
         msg = f"Docker connection error stopping container: {e}"
         logging.error(msg)
         cloudflared_agent_state["last_action_status"] = f"Error: {msg}"
-        global docker_client
+        # global docker_client # Already declared
         docker_client = None # Mark unusable
         stop_successful = False
     except Exception as e:
@@ -2020,7 +2023,6 @@ def stop_cloudflared_container():
             update_cloudflared_container_status()
         logging.info(f"Exiting stop_cloudflared_container function (Success: {stop_successful}).")
         return stop_successful
-
 
 # --- Flask Web UI ---
 app = Flask(__name__)
