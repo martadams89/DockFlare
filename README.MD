@@ -187,6 +187,74 @@ This method involves cloning the repository, which gives you access to the examp
 3.  **Restart or Deploy Labeled Containers:**
     After adding the labels, (re)start the labeled containers (e.g., `docker-compose up -d my-web-app`). DockFlare will detect the labels and automatically configure the Cloudflare Tunnel ingress rules.
 
+### Configuring Cloudflare Credentials (`.env` file)
+
+DockFlare needs credentials to interact with your Cloudflare account to manage tunnels and DNS records. You'll need to provide these in the `.env` file.
+
+**1. Finding Your Account ID (`CF_ACCOUNT_ID`)**
+
+Your Account ID identifies your entire Cloudflare account.
+
+*   Log in to the [Cloudflare Dashboard](https://dash.cloudflare.com/).
+*   Select any of your domain names (zones).
+*   On the domain's **Overview** page, scroll down the right-hand sidebar.
+*   You'll find your **Account ID** listed there. Copy this value.
+    *   *Direct Link (after login):* You can often find it quickly here: `https://dash.cloudflare.com/?to=/:account/support` (Look under "Account Details").
+
+**2. Finding Your Zone ID (`CF_ZONE_ID`)**
+
+Your Zone ID identifies a specific domain (zone) managed within your Cloudflare account.
+
+*   **Primary Zone:** You must specify *one* Zone ID here. This acts as the **primary** or **default** zone where DockFlare will create DNS CNAME records for your services *unless* you explicitly specify a different zone using labels on a container.
+*   **Multi-Zone Support:** DockFlare *can* manage DNS records across multiple zones within the same Cloudflare account (identified by `CF_ACCOUNT_ID`). To use a zone *other* than this primary one for a specific service, you will use the `cloudflare.tunnel.zonename` label on that service's container (see "Label your Docker containers" section below).
+*   **API Token Requirement:** Ensure the API Token you create (see step 3) has `Zone:DNS:Edit` permissions covering *all* the zones you intend to use, including this primary zone and any others you might specify with labels. Granting access to "All zones from an account" during token creation is the simplest way to enable this flexibility.
+
+*   **How to Find the Primary Zone ID:**
+    1.  Log in to the [Cloudflare Dashboard](https://dash.cloudflare.com/).
+    2.  Click on the **specific domain name** (e.g., `example.com`) that you want to designate as your **primary** zone for DockFlare.
+    3.  On that domain's **Overview** page, scroll down the right-hand sidebar.
+    4.  You'll find the **Zone ID** listed just below the Account ID. Copy this value to use for `CF_ZONE_ID` in your `.env` file.
+
+**3. Creating the API Token (`CF_API_TOKEN`)**
+
+For security, DockFlare requires an API **Token** with specific, limited permissions, rather than your Global API Key.
+
+*   **Permissions Needed:**
+    *   `Account` > `Cloudflare Tunnel` > `Edit`: Allows DockFlare to create, list, and delete Cloudflare Tunnels within your account.
+    *   `Zone` > `DNS` > `Edit`: Allows DockFlare to create and delete DNS records (specifically CNAME records pointing to your tunnel) within your zones.
+
+*   **Steps to Create the Token:**
+    1.  Log in to the [Cloudflare Dashboard](https://dash.cloudflare.com/).
+    2.  Click your **profile icon** in the top right corner and select "**My Profile**".
+    3.  Navigate to the "**API Tokens**" tab on the left sidebar.
+    4.  Click the "**Create Token**" button.
+    5.  Scroll down to the "**Custom token**" section and click "**Get started**".
+    6.  **Token Name:** Give your token a descriptive name, e.g., `DockFlare-Manager`.
+    7.  **Permissions:** Configure the following permissions:
+        *   **Permission 1 (Tunnel Management):**
+            *   Select: `Account`
+            *   Select: `Cloudflare Tunnel`
+            *   Select: `Edit`
+        *   **Permission 2 (DNS Management):**
+            *   Click "**+ Add more**"
+            *   Select: `Zone`
+            *   Select: `DNS`
+            *   Select: `Edit`
+    8.  **Account Resources:**
+        *   For the `Account - Cloudflare Tunnel - Edit` permission row, ensure it's set to:
+            *   `Include` > `Specific account` > `[Your Account Name]` (Select your main account).
+    9.  **Zone Resources:**
+        *   For the `Zone - DNS - Edit` permission row, configure it to grant access to the zones DockFlare might need:
+            *   `Include` > `All zones from an account` > `[Your Account Name]`
+            *   *(This is the most flexible option, allowing DockFlare to manage DNS for the primary `CF_ZONE_ID` and any other zones you might specify using the `cloudflare.tunnel.zonename` label later.)*
+            *   *(Alternatively, if you *only* ever plan to use the single zone defined by `CF_ZONE_ID`, you could select `Include` > `Specific zone` > `[Your Primary Domain Zone]`. However, using "All zones from an account" is generally recommended for flexibility.)*
+    10. **Client IP Address Filtering (Optional but Recommended):** If you know the static IP address(es) from which DockFlare will be running, you can restrict the token to only work from those IPs for added security.
+    11. **TTL (Optional):** Set an expiration date for the token if desired.
+    12. Click "**Continue to summary**".
+    13. Review the permissions and resource scopes carefully. Ensure they match the requirements (`Account:Cloudflare Tunnel:Edit`, `Zone:DNS:Edit`).
+    14. Click "**Create Token**".
+    15. **Important:** Cloudflare will now display your API Token. **Copy this token immediately** and store it securely. You will **not** be able to see it again after leaving this page.
+
 ## Technical Implementation
 
 *   **Language:** Python 3
