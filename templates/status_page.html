@@ -1,25 +1,17 @@
 <!DOCTYPE html>
-<!-- Basic HTML structure, dark mode will be handled by Tailwind via JS adding/removing 'dark' class -->
-<html lang="en" class=""> <!-- Start without 'dark' class initially -->
+<html lang="en" class="">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dockflare - Status</title>
-    <!-- Tailwind CSS Play CDN -->
-    <!-- IMPORTANT: For production, use the Tailwind CLI build process -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
-        // Optional: Customize Tailwind theme directly in the CDN script
         tailwind.config = {
-          darkMode: 'class', // Use class-based dark mode ('dark' class on <html>)
+          darkMode: 'class',
           theme: {
             extend: {
-              colors: {
-                // Add custom colors if needed, e.g.:
-                // 'brand-blue': '#1e40af',
-              },
+              colors: {},
               fontFamily: {
-                // Use system fonts for good performance and native feel
                 sans: ['Inter var', 'system-ui', 'sans-serif'],
                 mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', '"Liberation Mono"', '"Courier New"', 'monospace'],
               },
@@ -30,16 +22,11 @@
           }
         }
       </script>
-      <!-- Add Inter font (optional, but nice modern sans-serif) -->
       <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
       <style type="text/tailwindcss">
-        /* You can add custom base styles or component styles here if needed */
-        /* Example: Apply styles to the log lines (alternative to JS) */
         #log-output .log-status { @apply italic text-gray-400 dark:text-gray-500; }
         #log-output .log-status.error { @apply not-italic text-red-500 dark:text-red-400 font-semibold; }
         #log-output .log-status.connected { @apply not-italic text-green-500 dark:text-green-400; }
-
-        /* Style the scrollbar for the log output */
         #log-output::-webkit-scrollbar { width: 8px; }
         #log-output::-webkit-scrollbar-track { background: transparent; }
         #log-output::-webkit-scrollbar-thumb { background-color: rgba(156, 163, 175, 0.5); border-radius: 4px; border: 2px solid transparent; background-clip: content-box; }
@@ -50,28 +37,22 @@
 </head>
 <body class="bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100 min-h-screen flex flex-col font-sans transition-colors duration-300">
 
-    <!-- Theme Toggle Button -->
     <button id="theme-toggle" aria-label="Toggle theme" class="fixed bottom-4 right-4 z-50 p-3 rounded-full bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 shadow-lg hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-100 dark:focus:ring-offset-gray-900 focus:ring-indigo-500 transition-all duration-200 ease-in-out">
-        <!-- Icon will be updated by JS -->
         <span>🌓</span>
     </button>
 
-    <!-- Main Content Area -->
-    <main class="container mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12 flex-grow w-full max-w-5xl"> {/* Increased max-width */}
+    <main class="container mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12 flex-grow w-full max-w-5xl">
 
         <h1 class="text-4xl sm:text-5xl font-bold text-center mb-10 sm:mb-12 text-gray-800 dark:text-gray-200">Dockflare</h1>
 
-        <!-- Combined Tunnel & Agent Status Section -->
         <section class="bg-white dark:bg-gray-800 rounded-lg shadow-lg overflow-hidden mb-8 sm:mb-12 transition-shadow duration-300 hover:shadow-xl">
             <div class="px-6 py-5 sm:px-8 sm:py-6">
                 <h2 class="text-2xl sm:text-3xl font-semibold mb-6 text-gray-700 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700 pb-3">
                     Tunnel & Agent Status
                 </h2>
 
-                <!-- Initialization Status -->
                 <div class="mb-6">
                     <h3 class="text-lg font-semibold mb-3 text-gray-600 dark:text-gray-400">Cloudflare API & Tunnel Setup</h3>
-                    {# Determine border color and subtle background based on state #}
                     {% set status_box_class = 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' %}
                     {% if tunnel_state.get('error') %}
                       {% set status_box_class = 'border-red-500 bg-red-50 dark:bg-red-900/20' %}
@@ -89,7 +70,6 @@
                     </div>
                 </div>
 
-                <!-- Tunnel Details -->
                 <div class="mb-6">
                     <h4 class="text-md font-semibold mb-3 text-gray-600 dark:text-gray-400">Tunnel Details</h4>
                     <div class="space-y-2 text-sm">
@@ -102,7 +82,6 @@
                     </div>
                 </div>
 
-                <!-- Agent Control -->
                 <div>
                     <h3 class="text-lg font-semibold mb-3 text-gray-600 dark:text-gray-400">Agent Control</h3>
                      <p class="text-sm mb-4 text-gray-500 dark:text-gray-400">Manage the <code>{{ cloudflared_container_name }}</code> container.</p>
@@ -119,31 +98,32 @@
                         </div>
                     {% endif %}
 
-                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mt-2 p-4 bg-gray-50 dark:bg-gray-700/30 rounded-md">
-                         <div class="agent-status-info flex items-center space-x-2">
-                             <strong class="text-sm font-medium">Agent Status:</strong>
-                              {# Status Indicator Color Logic #}
-                             {% set indicator_class = 'bg-gray-400' %} {# Default/Unknown #}
+                    {# --- MODIFIED AGENT CONTROL SECTION --- #}
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 sm:gap-6 mt-2 p-4 bg-gray-50 dark:bg-gray-700/30 rounded-md">
+                         <div class="agent-status-info flex items-center space-x-3"> {/* Increased space */}
+                             <strong class="text-sm font-medium flex-shrink-0">Agent Status:</strong>
+                             {% set indicator_class = 'bg-gray-400' %}
                              {% if agent_state.container_status == 'running' %} {% set indicator_class = 'bg-green-500 animate-pulse-fast' %}
                              {% elif agent_state.container_status in ['exited', 'dead', 'not_found'] %} {% set indicator_class = 'bg-red-500' %}
                              {% elif agent_state.container_status == 'docker_unavailable' %} {% set indicator_class = 'bg-gray-500' %}
-                             {% elif agent_state.container_status in ['unknown', 'created', 'paused'] %} {% set indicator_class = 'bg-amber-500' %}
+                             {% elif agent_state.container_status in ['unknown', 'created', 'paused', 'restarting'] %} {# Added restarting here #}
+                                 {% set indicator_class = 'bg-amber-500' %}
                              {% endif %}
-                             <span class="status-indicator inline-block w-3 h-3 rounded-full {{ indicator_class }} shadow-sm"></span>
+                             <span class="status-indicator inline-block flex-shrink-0 w-3 h-3 rounded-full {{ indicator_class }} shadow-sm"></span>
 
-                              {# Status Text Color/Style Logic #}
-                             {% set status_text_class = 'text-gray-600 dark:text-gray-400' %} {# Default #}
+                             {% set status_text_class = 'text-gray-600 dark:text-gray-400' %}
                              {% if agent_state.container_status=='running' %} {% set status_text_class = 'text-green-600 dark:text-green-400' %}
                              {% elif 'error' in agent_state.container_status or agent_state.container_status=='docker_unavailable' or agent_state.container_status=='dead' or agent_state.container_status=='not_found' %} {% set status_text_class = 'text-red-600 dark:text-red-400' %}
-                             {% elif agent_state.container_status=='exited' %} {% set status_text_class = 'text-amber-600 dark:text-amber-400' %}
+                             {% elif agent_state.container_status in ['exited', 'restarting'] %} {# Added restarting here #}
+                                 {% set status_text_class = 'text-amber-600 dark:text-amber-400' %}
                              {% endif %}
                              <strong class="text-sm font-semibold capitalize {{ status_text_class }}">
                                  {{ agent_state.container_status.replace('_',' ') }}
                              </strong>
                          </div>
-                         <div class="agent-action-button w-full sm:w-auto">
-                             {# Button Styles: base, green, red, disabled state handled by Tailwind's disabled: prefix #}
-                             {% set base_button_style = 'w-full sm:w-auto px-5 py-2 rounded-md text-white font-semibold shadow-md transition-all duration-200 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-800 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none disabled:shadow-none' %}
+                         <div class="agent-action-button w-full sm:w-auto flex-shrink-0"> {/* Added flex-shrink-0 */}
+                             {# --- MODIFIED BUTTON STYLES --- #}
+                             {% set base_button_style = 'w-full sm:w-auto inline-flex items-center justify-center px-5 py-2 rounded-md text-white font-semibold shadow-md transition-all duration-200 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-800 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none disabled:shadow-none' %}
                              {% set start_button_style = 'bg-green-600 hover:bg-green-700 focus:ring-green-500 disabled:bg-green-300 dark:disabled:bg-green-800' %}
                              {% set stop_button_style = 'bg-red-600 hover:bg-red-700 focus:ring-red-500 disabled:bg-red-300 dark:disabled:bg-red-800' %}
 
@@ -161,12 +141,11 @@
                                  </form>
                              {% endif %}
                          </div>
-                    </div>
+                    </div> {# --- END OF MODIFIED AGENT CONTROL SECTION --- #}
                 </div>
             </div>
         </section>
 
-        <!-- Managed Ingress Rules Section -->
         <section class="bg-white dark:bg-gray-800 rounded-lg shadow-lg overflow-hidden mb-8 sm:mb-12 transition-shadow duration-300 hover:shadow-xl">
              <div class="px-6 py-5 sm:px-8 sm:py-6">
                 <h2 class="text-2xl sm:text-3xl font-semibold mb-6 text-gray-700 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700 pb-3">
@@ -174,7 +153,7 @@
                 </h2>
 
                 {% if rules %}
-                    <div class="overflow-x-auto -mx-6 sm:-mx-8"> {/* Allow horizontal scroll on smaller screens */}
+                    <div class="overflow-x-auto -mx-6 sm:-mx-8">
                         <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                             <thead class="bg-gray-50 dark:bg-gray-700/50">
                                 <tr>
@@ -198,9 +177,10 @@
                                             <code class="text-sm text-gray-700 dark:text-gray-300 font-mono">{{ details.service }}</code>
                                         </td>
                                         <td class="px-6 py-4 whitespace-nowrap">
-                                            {% set status_class = 'text-orange-600 dark:text-orange-400' if details.status=='pending' else 'text-green-600 dark:text-green-400' %}
-                                            <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full {{ 'bg-green-100 dark:bg-green-900/30 ' + status_class if details.status=='active' else 'bg-orange-100 dark:bg-orange-900/30 ' + status_class }}">
-                                                {{ details.status }}
+                                            {% set status_text_class = 'text-orange-600 dark:text-orange-400' if details.status=='pending' else 'text-green-600 dark:text-green-400' %}
+                                            {% set status_bg_class = 'bg-orange-100 dark:bg-orange-900/30' if details.status=='pending' else 'bg-green-100 dark:bg-green-900/30' %}
+                                            <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full {{ status_bg_class }} {{ status_text_class }}">
+                                                 {{ details.status }}
                                             </span>
                                         </td>
                                         <td class="px-6 py-4 whitespace-nowrap">
@@ -218,12 +198,15 @@
                                                 N/A
                                             {% endif %}
                                         </td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium"> {/* Removed text-right */}
+                                            {# --- MODIFIED DELETE BUTTON --- #}
                                             <form action="{{ url_for('force_delete_rule', hostname=hostname) }}" method="post" onsubmit="return confirm('Are you sure you want to force delete the rule and DNS record for {{ hostname }} immediately? This bypasses the grace period.');">
-                                                <button type="submit" class="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-200 hover:underline disabled:opacity-50 disabled:cursor-not-allowed disabled:no-underline" {{ 'disabled' if not docker_available else '' }}>
+                                                <button type="submit"
+                                                        class="px-2 py-1 rounded text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/30 hover:text-red-800 dark:hover:text-red-200 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-red-500 transition duration-150 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-transparent disabled:text-gray-400"
+                                                        {{ 'disabled' if not docker_available else '' }}>
                                                     Delete
                                                 </button>
-                                            </form>
+                                            </form> {# --- END MODIFIED DELETE BUTTON --- #}
                                         </td>
                                     </tr>
                                 {% endfor %}
@@ -236,20 +219,17 @@
             </div>
         </section>
 
-        <!-- Real-time Log Section -->
-         <section class="bg-white dark:bg-gray-800 rounded-lg shadow-lg overflow-hidden mb-8 sm:mb-12 transition-shadow duration-300 hover:shadow-xl">
+        <section class="bg-white dark:bg-gray-800 rounded-lg shadow-lg overflow-hidden mb-8 sm:mb-12 transition-shadow duration-300 hover:shadow-xl">
              <div class="px-6 py-5 sm:px-8 sm:py-6">
                  <h2 class="text-2xl sm:text-3xl font-semibold mb-4 text-gray-700 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700 pb-3">
                     Real-time Activity Logs
                  </h2>
-                {# Log output area - styled with dark background for contrast #}
                 <pre id="log-output" aria-live="polite" class="h-96 overflow-y-scroll bg-gray-900 dark:bg-black text-gray-300 dark:text-gray-300 border border-gray-700 dark:border-gray-600 rounded-md p-4 font-mono text-xs leading-relaxed shadow-inner">Connecting to log stream...</pre>
             </div>
         </section>
 
-    </main> <!-- end .container -->
+    </main>
 
-    <!-- Footer Section -->
     <footer class="text-center py-6 mt-auto text-sm text-gray-500 dark:text-gray-400 border-t border-gray-200 dark:border-gray-700">
         <div class="container mx-auto px-4 sm:px-6 lg:px-8">
             <p class="mb-1">
@@ -268,128 +248,49 @@
     </footer>
 
 
-    <!-- JavaScript Section -->
     <script>
       // --- Theme Toggle Logic ---
       const themeToggleButton = document.getElementById('theme-toggle');
       const themeToggleIcon = themeToggleButton.querySelector('span');
-      const htmlElement = document.documentElement; // Target <html> tag
-
-      const setTheme = (theme) => {
-        localStorage.setItem('theme', theme);
-        if (theme === 'dark') {
-          htmlElement.classList.add('dark');
-          themeToggleIcon.textContent = '☀️'; // Sun icon for dark mode
-        } else {
-          htmlElement.classList.remove('dark');
-          themeToggleIcon.textContent = '🌓'; // Moon icon for light mode
-        }
-      };
-
-      const toggleTheme = () => {
-        const currentTheme = localStorage.getItem('theme') || (htmlElement.classList.contains('dark') ? 'dark' : 'light');
-        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-        setTheme(newTheme);
-      };
-
+      const htmlElement = document.documentElement;
+      const setTheme = (theme) => { localStorage.setItem('theme', theme); if (theme === 'dark') { htmlElement.classList.add('dark'); themeToggleIcon.textContent = '☀️'; } else { htmlElement.classList.remove('dark'); themeToggleIcon.textContent = '🌓'; } };
+      const toggleTheme = () => { const currentTheme = localStorage.getItem('theme') || (htmlElement.classList.contains('dark') ? 'dark' : 'light'); const newTheme = currentTheme === 'dark' ? 'light' : 'dark'; setTheme(newTheme); };
       themeToggleButton.addEventListener('click', toggleTheme);
-
-      // Initialize theme based on saved preference or system setting
-      const initTheme = () => {
-        const savedTheme = localStorage.getItem('theme');
-        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        if (savedTheme) {
-          setTheme(savedTheme);
-        } else {
-          setTheme(prefersDark ? 'dark' : 'light');
-        }
-      };
+      const initTheme = () => { const savedTheme = localStorage.getItem('theme'); const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches; if (savedTheme) { setTheme(savedTheme); } else { setTheme(prefersDark ? 'dark' : 'light'); } };
       initTheme();
 
-
-      // --- Countdown Timer Logic (No changes needed from original) ---
+      // --- Countdown Timer Logic ---
       const countdownElements = document.querySelectorAll('.countdown-timer');
       function formatTimeDifference(diffMillis) { const totalSeconds = Math.round(Math.abs(diffMillis / 1000)); if (totalSeconds < 60) { return diffMillis >= 0 ? 'in <1m' : '<1m ago'; } const days = Math.floor(totalSeconds / (3600 * 24)); const hours = Math.floor((totalSeconds % (3600 * 24)) / 3600); const minutes = Math.floor((totalSeconds % 3600) / 60); let parts = []; if (days > 0) parts.push(`${days}d`); if (hours > 0) parts.push(`${hours}h`); if (minutes > 0 || (days === 0 && hours === 0)) parts.push(`${minutes}m`); const timeString = parts.join(' '); return diffMillis >= 0 ? `in ${timeString}` : `${timeString} ago`; }
       function updateCountdowns() { const now = new Date(); countdownElements.forEach(span => { const td = span.closest('td[data-delete-at]'); if (!td) return; const deleteAtISO = td.dataset.deleteAt; if (!deleteAtISO) return; try { const targetDate = new Date(deleteAtISO); if (isNaN(targetDate.getTime())) { throw new Error("Invalid date parsed"); } const diff = targetDate - now; span.textContent = `(${formatTimeDifference(diff)})`; if (diff < 0) { span.classList.add('text-red-500'); } else { span.classList.remove('text-red-500'); } } catch (e) { console.error("Error parsing date for countdown:", deleteAtISO, e); span.textContent = "(invalid date)"; } }); }
-      if (countdownElements.length > 0) {
-        updateCountdowns(); // Run once on load
-        const countdownInterval = setInterval(updateCountdowns, 30000); // Update every 30s
-      }
+      if (countdownElements.length > 0) { updateCountdowns(); const countdownInterval = setInterval(updateCountdowns, 30000); }
 
-
-      // --- Real-time Log Streaming (Updated to use Tailwind classes or style block) ---
+      // --- Real-time Log Streaming ---
       const logOutput = document.getElementById('log-output');
-      const maxLogLines = 250; // Limit number of lines in the display
-      let initialConnectMessageCleared = false; // Flag to clear initial message
-
+      const maxLogLines = 250;
+      let initialConnectMessageCleared = false;
       function addLogLine(message, type = 'log') {
-            if (!initialConnectMessageCleared && logOutput.textContent.includes('Connecting to log stream...')) {
-                logOutput.textContent = ''; // Clear initial message
-                initialConnectMessageCleared = true;
-            }
-
+            if (!initialConnectMessageCleared && logOutput.textContent.includes('Connecting to log stream...')) { logOutput.textContent = ''; initialConnectMessageCleared = true; }
             const newLogLine = document.createElement('div');
             newLogLine.textContent = message;
-            newLogLine.classList.add('mb-1'); // Add bottom margin using Tailwind
-
-            // Add type-specific classes (these match the @apply rules in the <style> block)
+            newLogLine.classList.add('mb-1');
             if (type === 'status') { newLogLine.classList.add('log-status'); }
             else if (type === 'error') { newLogLine.classList.add('log-status', 'error'); }
             else if (type === 'connected') { newLogLine.classList.add('log-status', 'connected'); }
-
-            const isScrolledToBottom = logOutput.scrollHeight - logOutput.clientHeight <= logOutput.scrollTop + 10; // Increased tolerance slightly
-
+            const isScrolledToBottom = logOutput.scrollHeight - logOutput.clientHeight <= logOutput.scrollTop + 10;
             logOutput.appendChild(newLogLine);
-
-            // Trim old log lines
-            while (logOutput.childNodes.length > maxLogLines) {
-                logOutput.removeChild(logOutput.firstChild);
-            }
-
-            // Auto-scroll if user hasn't scrolled up
-            if (isScrolledToBottom) {
-                logOutput.scrollTop = logOutput.scrollHeight;
-            }
+            while (logOutput.childNodes.length > maxLogLines) { logOutput.removeChild(logOutput.firstChild); }
+            if (isScrolledToBottom) { logOutput.scrollTop = logOutput.scrollHeight; }
       }
-
       function connectEventSource() {
           if (!!window.EventSource) {
               const logSource = new EventSource('/stream-logs');
-
-              logSource.onopen = function() {
-                  console.log("Log stream connection opened.");
-                  addLogLine("--- Log stream connected ---", 'connected'); // Use the new type
-              };
-
-              logSource.onmessage = function(event) {
-                  // Attempt to parse JSON, otherwise treat as plain text
-                  try {
-                    const data = JSON.parse(event.data);
-                    // Handle structured logs if your backend sends them, e.g.:
-                    // addLogLine(`[${data.level}] ${data.message}`, data.level);
-                    // For now, just display the raw JSON string or text
-                    addLogLine(event.data, 'log');
-                  } catch (e) {
-                    // Not JSON, treat as plain log message
-                    addLogLine(event.data, 'log');
-                  }
-              };
-
-              logSource.onerror = function(err) {
-                  console.error("EventSource failed:", err);
-                  addLogLine("--- Log stream connection error. Retrying in 5s... ---", 'error'); // Use the new type
-                  logSource.close();
-                  // Implement exponential backoff or smarter retry later if needed
-                  setTimeout(connectEventSource, 5000);
-              };
-          } else {
-              logOutput.textContent = "Your browser doesn't support Server-Sent Events, cannot display real-time logs.";
-              // Add Tailwind classes for emphasis
-              logOutput.classList.add('text-orange-500', 'font-semibold');
-          }
+              logSource.onopen = function() { console.log("Log stream connection opened."); addLogLine("--- Log stream connected ---", 'connected'); };
+              logSource.onmessage = function(event) { try { const data = JSON.parse(event.data); addLogLine(event.data, 'log'); } catch (e) { addLogLine(event.data, 'log'); } };
+              logSource.onerror = function(err) { console.error("EventSource failed:", err); addLogLine("--- Log stream connection error. Retrying in 5s... ---", 'error'); logSource.close(); setTimeout(connectEventSource, 5000); };
+          } else { logOutput.textContent = "Your browser doesn't support Server-Sent Events, cannot display real-time logs."; logOutput.classList.add('text-orange-500', 'font-semibold'); }
       }
-      connectEventSource(); // Initial connection
-
+      connectEventSource();
     </script>
 
 </body>
