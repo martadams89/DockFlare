@@ -3,40 +3,29 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <!-- Removed meta refresh, relying on SSE and user action -->
+    <meta http-equiv="refresh" content="60"> <!-- Auto-refresh every 60 seconds (less frequent now logs are real-time) -->
     <!-- Pico.css CDN Link -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@latest/css/pico.min.css">
     <title>Dockflare</title>
     <style>
         /* --- Base & Layout --- */
-        :root {
-          --container-max-width: 1140px; /* Wider container */
-        }
         body { padding-top: 1.5rem; padding-bottom: 2rem; display: flex; flex-direction: column; min-height: 100vh; }
-        main.container { flex-grow: 1; max-width: var(--container-max-width); width: 100%; padding-bottom: 2rem; margin-left: auto; margin-right: auto; }
+        main.container { flex-grow: 1; max-width: 960px; width: 100%; padding-bottom: 2rem; margin-left: auto; margin-right: auto; }
         h1, h2, h3, h4 { margin-top: 1.5em; margin-bottom: 0.6em; color: var(--pico-h_color); }
         h1 { margin-top: 0; text-align: center; margin-bottom: 1.5rem; font-weight: 600; }
-        article {
-            margin-bottom: 2rem;
-            padding: 1.5rem;
-            /* Removed border, relying on background and shadow */
-            border: none;
-            border-radius: var(--pico-card-border-radius);
-            background-color: var(--pico-card-background-color);
-            box-shadow: var(--pico-box-shadow); /* Use standard box shadow for separation */
-        }
+        article { margin-bottom: 2rem; padding: 1.5rem; border: 1px solid var(--pico-card-border-color); border-radius: var(--pico-card-border-radius); background-color: var(--pico-card-background-color); box-shadow: var(--pico-card-box-shadow); }
         hgroup { margin-bottom: 1rem; }
         p { line-height: 1.6; }
 
         /* --- Code & Pre Styling --- */
         code { background-color: var(--pico-code-background-color); color: var(--pico-code-color); padding: 0.15em 0.4em; border-radius: var(--pico-border-radius); font-size: 0.9em; font-family: var(--pico-font-family-monospace); word-break: break-word; }
-        td code, h3 code, h4 code { background-color: transparent; padding: 0; font-family: var(--pico-font-family-monospace); font-size: 0.95em; }
+        td code, h3 code { background-color: transparent; padding: 0; font-family: var(--pico-font-family-monospace); font-size: 0.95em; }
         pre { background-color: var(--pico-code-background-color); border: 1px solid var(--pico-form-element-border-color); border-radius: var(--pico-border-radius); padding: 0.75rem 1rem; color: var(--pico-color); margin-top: 0.25rem; white-space: pre-wrap; word-break: break-all; font-family: var(--pico-font-family-monospace); font-size: 0.9em; line-height: 1.5; }
         .token-display { margin-top: 0.5rem; }
         .token-display strong { display: block; margin-bottom: 0.2rem; }
 
         /* --- Status Boxes & Indicators --- */
-        .status-box { padding: 1rem 1.25rem; border: 1px solid var(--pico-form-element-border-color); border-radius: var(--pico-border-radius); margin-top: 1rem; margin-bottom: 1rem; word-wrap: break-word; background-color: var(--pico-card-sectioning-background-color); /* Slightly different background */ color: var(--pico-color); border-left-width: 4px; /* Slightly thinner side border */ box-shadow: var(--pico-box-shadow-inset); }
+        .status-box { padding: 1rem 1.25rem; border: 1px solid var(--pico-form-element-border-color); border-radius: var(--pico-border-radius); margin-top: 1rem; margin-bottom: 1rem; word-wrap: break-word; background-color: var(--pico-card-background-color); color: var(--pico-color); border-left-width: 5px; box-shadow: var(--pico-box-shadow-inset); }
         .status-box p:last-child { margin-bottom: 0; }
         .status-box strong { color: var(--pico-h_color); }
         .status-box.error { border-left-color: var(--pico-color-red-600); }
@@ -55,27 +44,14 @@
 
         /* --- Forms & Buttons --- */
         form { display: inline-block; margin: 0; }
+        form button { margin: 0; font-weight: 500; }
+        .grid > form > button { width: 100%; }
         button.delete-button { font-size: 0.85em; padding: 0.4rem 0.6rem; --pico-color: var(--pico-color-red-600); --pico-color-hover: var(--pico-color-red-700); --pico-color-focus: var(--pico-color-red-700); }
-
-        /* --- Toggle Switch Styling (iOS inspired) --- */
-        .agent-control-section { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; margin-top: 1.5rem; }
-        .agent-status-info { flex-grow: 1; }
-        .switch-container { display: flex; align-items: center; }
-        .switch { position: relative; display: inline-block; width: 56px; height: 30px; margin-left: 1rem; }
-        .switch input { opacity: 0; width: 0; height: 0; }
-        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: var(--pico-form-element-disabled-background-color); -webkit-transition: .3s; transition: .3s; border-radius: 30px; border: 1px solid var(--pico-form-element-border-color); }
-        .slider:before { position: absolute; content: ""; height: 22px; width: 22px; left: 3px; bottom: 3px; background-color: white; -webkit-transition: .3s; transition: .3s; border-radius: 50%; box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
-        input:checked + .slider { background-color: var(--pico-color-green-500); border-color: var(--pico-color-green-600); }
-        input:focus + .slider { box-shadow: 0 0 1px var(--pico-color-green-500); }
-        input:checked + .slider:before { -webkit-transform: translateX(26px); -ms-transform: translateX(26px); transform: translateX(26px); }
-        /* Disabled state */
-        input:disabled + .slider { cursor: not-allowed; background-color: var(--pico-form-element-disabled-background-color); opacity: 0.6; border-color: var(--pico-form-element-border-color); }
-        input:disabled + .slider:before { background-color: var(--pico-muted-color); }
 
         /* --- Table Styling --- */
         figure { margin: 1.5rem 0; overflow-x: auto; }
-        table { white-space: nowrap; width: 100%; } /* Ensure table takes full width */
-        table th { font-weight: 600; background-color: var(--pico-table-header-background); color: var(--pico-table-header-color); }
+        table { white-space: nowrap; }
+        table th { font-weight: 600; }
         table td, table th { padding: 0.75rem 1rem; vertical-align: middle; }
         table tbody tr:hover { background-color: var(--pico-table-row-striping-background-color); }
         table td:nth-child(1), table td:nth-child(2) { white-space: normal; }
@@ -114,11 +90,21 @@
             word-wrap: break-word; /* Break words if needed */
             box-shadow: var(--pico-box-shadow-inset); /* Subtle inset shadow */
         }
-        #log-output div { margin-bottom: 2px; /* Tiny space between lines */ }
+        #log-output div {
+            margin-bottom: 2px; /* Tiny space between lines */
+        }
         /* Style for status messages from the stream */
-        #log-output .log-status { font-style: italic; color: var(--pico-muted-color); }
-        #log-output .log-status.error { color: var(--pico-color-red-600); font-weight: bold; }
-        #log-output .log-status.connected { color: var(--pico-color-green-600); }
+        #log-output .log-status {
+            font-style: italic;
+            color: var(--pico-muted-color);
+        }
+        #log-output .log-status.error {
+            color: var(--pico-color-red-600);
+            font-weight: bold;
+        }
+        #log-output .log-status.connected {
+             color: var(--pico-color-green-600);
+        }
 
     </style>
 </head>
@@ -131,43 +117,27 @@
 
         <h1>Dockflare</h1>
 
-        <!-- Combined Tunnel & Agent Status Section -->
+        <!-- Initialization Status Section -->
         <article>
-            <h2>Tunnel & Agent Status</h2>
-
-            <!-- Initialization Status -->
-            <hgroup><h3>Cloudflare API & Tunnel Setup</h3></hgroup>
+            <hgroup><h2>Initialization Status</h2><h3>Cloudflare API Interaction</h3></hgroup>
             <div class="status-box {{ 'error' if tunnel_state.get('error') else ('success' if tunnel_state.get('token') else 'info') }}">
-                <p><strong>API Status:</strong> {{ tunnel_state.status_message }}</p>
+                <p><strong>Status:</strong> {{ tunnel_state.status_message }}</p>
                 {% if tunnel_state.get('error') %}<p><strong>Error Details:</strong> <pre>{{ tunnel_state.error }}</pre></p>{% endif %}
             </div>
-
-            <!-- Tunnel Details -->
             <h4>Tunnel Details</h4>
             <p><strong>Desired Tunnel Name:</strong> <code>{{ tunnel_state.name }}</code></p>
             <p><strong>Tunnel ID:</strong> <code>{{ tunnel_state.id if tunnel_state.id else 'N/A' }}</code></p>
             <div class="token-display"><strong>Tunnel Token:</strong><pre>{{ display_token }}</pre></div>
+        </article>
 
-            <!-- Agent Control -->
-            <hgroup><h3>Agent Control: <code>{{ cloudflared_container_name }}</code></h3></hgroup>
+        <!-- Tunnel Agent Control Section -->
+        <article>
+            <hgroup><h2>Tunnel Agent Control</h2><h3>Docker Container: <code>{{ cloudflared_container_name }}</code></h3></hgroup>
+            <p><strong>Agent Container Status:</strong> <span class="status-indicator {{ agent_state.container_status }}"></span> <strong style="text-transform: capitalize;" class="{{'success' if agent_state.container_status=='running' else ('error' if 'error' in agent_state.container_status or agent_state.container_status=='docker_unavailable' or agent_state.container_status=='dead' or agent_state.container_status=='not_found' else ('warning' if agent_state.container_status=='exited' else 'info')) }}">{{ agent_state.container_status.replace('_',' ') }}</strong></p>
             {% if agent_state.last_action_status %}<div class="status-box {{ 'error' if 'Error:' in agent_state.last_action_status else ('warning' if 'Warning:' in agent_state.last_action_status else 'info') }}"><p><strong>Last Action Result:</strong> {{ agent_state.last_action_status }}</p></div>{% endif %}
-
-            <div class="agent-control-section">
-                 <div class="agent-status-info">
-                     <strong>Agent Container Status:</strong>
-                     <span class="status-indicator {{ agent_state.container_status }}"></span>
-                     <strong style="text-transform: capitalize;" class="{{'success' if agent_state.container_status=='running' else ('error' if 'error' in agent_state.container_status or agent_state.container_status=='docker_unavailable' or agent_state.container_status=='dead' or agent_state.container_status=='not_found' else ('warning' if agent_state.container_status=='exited' else 'info')) }}">
-                         {{ agent_state.container_status.replace('_',' ') }}
-                     </strong>
-                 </div>
-                 <div class="switch-container">
-                     <label class="switch" aria-label="Toggle Cloudflared Agent">
-                         <input type="checkbox" id="agent-toggle"
-                                {{ 'checked' if agent_state.container_status=='running' }}
-                                {{ 'disabled' if not tunnel_state.get('token') or not docker_available }}>
-                         <span class="slider"></span>
-                     </label>
-                 </div>
+            <div class="grid">
+                 <form action="{{ url_for('start_tunnel') }}" method="post"><button type="submit" {{ 'disabled' if not tunnel_state.get('token') or agent_state.container_status=='running' or not docker_available }}>Start Agent</button></form>
+                 <form action="{{ url_for('stop_tunnel') }}" method="post"><button type="submit" class="secondary" {{ 'disabled' if agent_state.container_status!='running' or not docker_available }}>Stop Agent</button></form>
             </div>
         </article>
 
@@ -231,43 +201,8 @@
       function formatTimeDifference(diffMillis) { const totalSeconds = Math.round(Math.abs(diffMillis / 1000)); if (totalSeconds < 60) { return diffMillis >= 0 ? 'in <1m' : 'Expired <1m ago'; } const days = Math.floor(totalSeconds / (3600 * 24)); const hours = Math.floor((totalSeconds % (3600 * 24)) / 3600); const minutes = Math.floor((totalSeconds % 3600) / 60); let parts = []; if (days > 0) parts.push(`${days}d`); if (hours > 0) parts.push(`${hours}h`); if (minutes > 0 || (days === 0 && hours === 0)) parts.push(`${minutes}m`); const timeString = parts.join(' '); return diffMillis >= 0 ? `in ${timeString}` : `Expired ${timeString} ago`; }
       function updateCountdowns() { const now = new Date(); countdownElements.forEach(span => { const td = span.closest('td'); if (!td) return; const deleteAtISO = td.dataset.deleteAt; if (!deleteAtISO) return; try { const targetDate = new Date(deleteAtISO); if (isNaN(targetDate.getTime())) { throw new Error("Invalid date parsed"); } const diff = targetDate - now; span.textContent = `(${formatTimeDifference(diff)})`; if (diff < 0) { span.classList.add('expired'); } else { span.classList.remove('expired'); } } catch (e) { console.error("Error parsing date for countdown:", deleteAtISO, e); span.textContent = "(invalid date)"; } }); }
       updateCountdowns(); // Run once on load
-      // Interval potentially useful if you remove page reload on toggle
+      // No interval needed if page refreshes anyway, but keep if refresh is removed
       // const countdownInterval = setInterval(updateCountdowns, 30000);
-
-      // --- Agent Toggle Switch Logic ---
-      const agentToggle = document.getElementById('agent-toggle');
-      if (agentToggle) {
-          agentToggle.addEventListener('change', function() {
-              const isChecked = this.checked;
-              const url = isChecked ? "{{ url_for('start_tunnel') }}" : "{{ url_for('stop_tunnel') }}";
-              const actionVerb = isChecked ? 'Starting' : 'Stopping';
-
-              // Disable toggle immediately to prevent rapid clicks
-              this.disabled = true;
-              console.log(`${actionVerb} agent...`);
-              // Optionally update status text immediately (e.g., add a temporary "pending" state)
-
-              fetch(url, { method: 'POST' })
-                  .then(response => {
-                      if (!response.ok) {
-                          // Basic error handling - could show a notification
-                          console.error(`${actionVerb} request failed with status: ${response.status}`);
-                      }
-                      // Reload the page after a short delay to reflect backend state changes
-                      setTimeout(() => {
-                          window.location.reload();
-                      }, 1500); // Delay allows backend some time, adjust as needed
-                  })
-                  .catch(error => {
-                      console.error(`Error during ${actionVerb} request:`, error);
-                      // Re-enable toggle even on error after delay, or reload anyway
-                       setTimeout(() => {
-                          window.location.reload();
-                      }, 1500);
-                  });
-          });
-      }
-
 
       // --- Real-time Log Streaming ---
       const logOutput = document.getElementById('log-output');
@@ -284,37 +219,62 @@
             const newLogLine = document.createElement('div');
             newLogLine.textContent = message; // Use textContent to prevent XSS
 
-            if (type === 'status') { newLogLine.classList.add('log-status'); }
-            else if (type === 'error') { newLogLine.classList.add('log-status', 'error'); }
-            else if (type === 'connected') { newLogLine.classList.add('log-status', 'connected'); }
+            if (type === 'status') {
+                newLogLine.classList.add('log-status');
+            } else if (type === 'error') {
+                newLogLine.classList.add('log-status', 'error');
+            } else if (type === 'connected') {
+                newLogLine.classList.add('log-status', 'connected');
+            }
             // Add more types (e.g., 'warning') if needed based on log level parsing
 
+            // Check scroll position before appending
             const isScrolledToBottom = logOutput.scrollHeight - logOutput.clientHeight <= logOutput.scrollTop + 5; // Add buffer
+
             logOutput.appendChild(newLogLine);
 
+            // Limit number of lines in the log display
             while (logOutput.childNodes.length > maxLogLines) {
                 logOutput.removeChild(logOutput.firstChild);
             }
-            if (isScrolledToBottom) { logOutput.scrollTop = logOutput.scrollHeight; }
+
+            // Auto-scroll to bottom only if user was already near the bottom
+            if (isScrolledToBottom) {
+                logOutput.scrollTop = logOutput.scrollHeight;
+            }
       }
 
       function connectEventSource() {
           if (!!window.EventSource) { // Check if browser supports Server-Sent Events
               const logSource = new EventSource('/stream-logs'); // Connect to the stream
-              logSource.onopen = function() { console.log("Log stream connection opened."); };
-              logSource.onmessage = function(event) { addLogLine(event.data, 'log'); };
+
+              logSource.onopen = function() {
+                  console.log("Log stream connection opened.");
+                  // Message sent from server now on connect
+              };
+
+              logSource.onmessage = function(event) {
+                  // event.data contains the log message from the server
+                  addLogLine(event.data, 'log');
+              };
+
               logSource.onerror = function(err) {
                   console.error("EventSource failed:", err);
                   addLogLine("--- Log stream connection error. Retrying... ---", 'error');
                   logSource.close(); // Close the connection
+                  // Optional: Implement backoff before retrying
                   setTimeout(connectEventSource, 5000); // Retry after 5 seconds
               };
+
           } else {
+              // Fallback for browsers that don't support EventSource
               logOutput.textContent = "Your browser doesn't support Server-Sent Events, cannot display real-time logs.";
               logOutput.style.color = 'orange';
           }
       }
-      connectEventSource(); // Initial connection
+
+      // Initial connection
+      connectEventSource();
 
     </script>
 
