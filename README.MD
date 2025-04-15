@@ -1,4 +1,4 @@
-# DockFlare: Cloudflare Tunnel Ingress Controller for Docker
+# DockFlare: Cloudflare Tunnel Ingress Controller
 
 [![Maintenance](https://img.shields.io/badge/Maintained%3F-yes-green.svg)](https://github.com/ChrispyBacon-dev/baconflip)
 [![OS](https://img.shields.io/badge/os-linux%20%7C%20windows%20%7C%20macos-brightgreen)]()
@@ -187,7 +187,7 @@ This method involves cloning the repository, which gives you access to the examp
 3.  **Restart or Deploy Labeled Containers:**
     After adding the labels, (re)start the labeled containers (e.g., `docker-compose up -d my-web-app`). DockFlare will detect the labels and automatically configure the Cloudflare Tunnel ingress rules.
 
-### Configuring Cloudflare Credentials (`.env` file)
+## Configuring Cloudflare Credentials (`.env` file)
 
 DockFlare needs credentials to interact with your Cloudflare account to manage tunnels and DNS records. You'll need to provide these in the `.env` file.
 
