@@ -84,7 +84,6 @@
 
                 <div>
                     <h3 class="text-lg font-semibold mb-3 text-gray-600 dark:text-gray-400">Agent Control</h3>
-                     <p class="text-sm mb-4 text-gray-500 dark:text-gray-400">Manage the <code>{{ cloudflared_container_name }}</code> container.</p>
 
                     {% if agent_state.last_action_status %}
                         {% set action_box_class = 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' %}
@@ -98,50 +97,52 @@
                         </div>
                     {% endif %}
 
-                    {# --- MODIFIED AGENT CONTROL SECTION --- #}
                     <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 sm:gap-6 mt-2 p-4 bg-gray-50 dark:bg-gray-700/30 rounded-md">
-                         <div class="agent-status-info flex items-center space-x-3"> {/* Increased space */}
-                             <strong class="text-sm font-medium flex-shrink-0">Agent Status:</strong>
-                             {% set indicator_class = 'bg-gray-400' %}
-                             {% if agent_state.container_status == 'running' %} {% set indicator_class = 'bg-green-500 animate-pulse-fast' %}
-                             {% elif agent_state.container_status in ['exited', 'dead', 'not_found'] %} {% set indicator_class = 'bg-red-500' %}
-                             {% elif agent_state.container_status == 'docker_unavailable' %} {% set indicator_class = 'bg-gray-500' %}
-                             {% elif agent_state.container_status in ['unknown', 'created', 'paused', 'restarting'] %} {# Added restarting here #}
-                                 {% set indicator_class = 'bg-amber-500' %}
-                             {% endif %}
-                             <span class="status-indicator inline-block flex-shrink-0 w-3 h-3 rounded-full {{ indicator_class }} shadow-sm"></span>
+                         <div class="agent-status-info flex-grow space-y-1.5">
+                            <div class="flex items-center space-x-3">
+                                <strong class="text-sm font-medium flex-shrink-0 w-28">Agent Status:</strong>
+                                {% set indicator_class = 'bg-gray-400' %}
+                                {% if agent_state.container_status == 'running' %} {% set indicator_class = 'bg-green-500 animate-pulse-fast' %}
+                                {% elif agent_state.container_status in ['exited', 'dead', 'not_found'] %} {% set indicator_class = 'bg-red-500' %}
+                                {% elif agent_state.container_status == 'docker_unavailable' %} {% set indicator_class = 'bg-gray-500' %}
+                                {% elif agent_state.container_status in ['unknown', 'created', 'paused', 'restarting'] %}
+                                    {% set indicator_class = 'bg-amber-500' %}
+                                {% endif %}
+                                <span class="status-indicator inline-block flex-shrink-0 w-3 h-3 rounded-full {{ indicator_class }} shadow-sm"></span>
 
-                             {% set status_text_class = 'text-gray-600 dark:text-gray-400' %}
-                             {% if agent_state.container_status=='running' %} {% set status_text_class = 'text-green-600 dark:text-green-400' %}
-                             {% elif 'error' in agent_state.container_status or agent_state.container_status=='docker_unavailable' or agent_state.container_status=='dead' or agent_state.container_status=='not_found' %} {% set status_text_class = 'text-red-600 dark:text-red-400' %}
-                             {% elif agent_state.container_status in ['exited', 'restarting'] %} {# Added restarting here #}
-                                 {% set status_text_class = 'text-amber-600 dark:text-amber-400' %}
-                             {% endif %}
-                             <strong class="text-sm font-semibold capitalize {{ status_text_class }}">
-                                 {{ agent_state.container_status.replace('_',' ') }}
-                             </strong>
+                                {% set status_text_class = 'text-gray-600 dark:text-gray-400' %}
+                                {% if agent_state.container_status=='running' %} {% set status_text_class = 'text-green-600 dark:text-green-400' %}
+                                {% elif 'error' in agent_state.container_status or agent_state.container_status=='docker_unavailable' or agent_state.container_status=='dead' or agent_state.container_status=='not_found' %} {% set status_text_class = 'text-red-600 dark:text-red-400' %}
+                                {% elif agent_state.container_status in ['exited', 'restarting'] %}
+                                    {% set status_text_class = 'text-amber-600 dark:text-amber-400' %}
+                                {% endif %}
+                                <strong class="text-sm font-semibold capitalize {{ status_text_class }}">
+                                    {{ agent_state.container_status.replace('_',' ') }}
+                                </strong>
+                            </div>
+                            <div class="flex items-center text-sm">
+                                <strong class="font-medium text-gray-600 dark:text-gray-400 flex-shrink-0 w-28">Agent Name:</strong>
+                                <code class="ml-3 bg-gray-200 dark:bg-gray-700 text-indigo-700 dark:text-indigo-300 px-1.5 py-0.5 rounded font-mono text-xs align-middle truncate" title="{{ cloudflared_container_name }}">
+                                    {{ cloudflared_container_name }}
+                                </code>
+                            </div>
                          </div>
-                         <div class="agent-action-button w-full sm:w-auto flex-shrink-0"> {/* Added flex-shrink-0 */}
-                             {# --- MODIFIED BUTTON STYLES --- #}
+
+                         <div class="agent-action-button w-full sm:w-auto flex-shrink-0">
                              {% set base_button_style = 'w-full sm:w-auto inline-flex items-center justify-center px-5 py-2 rounded-md text-white font-semibold shadow-md transition-all duration-200 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-800 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none disabled:shadow-none' %}
                              {% set start_button_style = 'bg-green-600 hover:bg-green-700 focus:ring-green-500 disabled:bg-green-300 dark:disabled:bg-green-800' %}
                              {% set stop_button_style = 'bg-red-600 hover:bg-red-700 focus:ring-red-500 disabled:bg-red-300 dark:disabled:bg-red-800' %}
-
                              {% if agent_state.container_status=='running' %}
                                  <form action="{{ url_for('stop_tunnel') }}" method="post" class="inline-block w-full sm:w-auto">
-                                     <button type="submit" class="{{ base_button_style }} {{ stop_button_style }}" {{ 'disabled' if not docker_available else '' }}>
-                                         Stop Agent
-                                     </button>
+                                     <button type="submit" class="{{ base_button_style }} {{ stop_button_style }}" {{ 'disabled' if not docker_available else '' }}>Stop Agent</button>
                                  </form>
                              {% else %}
                                  <form action="{{ url_for('start_tunnel') }}" method="post" class="inline-block w-full sm:w-auto">
-                                     <button type="submit" class="{{ base_button_style }} {{ start_button_style }}" {{ 'disabled' if not tunnel_state.get('token') or not docker_available else '' }}>
-                                         Start Agent
-                                     </button>
+                                     <button type="submit" class="{{ base_button_style }} {{ start_button_style }}" {{ 'disabled' if not tunnel_state.get('token') or not docker_available else '' }}>Start Agent</button>
                                  </form>
                              {% endif %}
                          </div>
-                    </div> {# --- END OF MODIFIED AGENT CONTROL SECTION --- #}
+                    </div>
                 </div>
             </div>
         </section>
@@ -198,15 +199,14 @@
                                                 N/A
                                             {% endif %}
                                         </td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium"> {/* Removed text-right */}
-                                            {# --- MODIFIED DELETE BUTTON --- #}
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
                                             <form action="{{ url_for('force_delete_rule', hostname=hostname) }}" method="post" onsubmit="return confirm('Are you sure you want to force delete the rule and DNS record for {{ hostname }} immediately? This bypasses the grace period.');">
                                                 <button type="submit"
                                                         class="px-2 py-1 rounded text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/30 hover:text-red-800 dark:hover:text-red-200 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-red-500 transition duration-150 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-transparent disabled:text-gray-400"
                                                         {{ 'disabled' if not docker_available else '' }}>
                                                     Delete
                                                 </button>
-                                            </form> {# --- END MODIFIED DELETE BUTTON --- #}
+                                            </form>
                                         </td>
                                     </tr>
                                 {% endfor %}
@@ -249,7 +249,6 @@
 
 
     <script>
-      // --- Theme Toggle Logic ---
       const themeToggleButton = document.getElementById('theme-toggle');
       const themeToggleIcon = themeToggleButton.querySelector('span');
       const htmlElement = document.documentElement;
@@ -259,13 +258,11 @@
       const initTheme = () => { const savedTheme = localStorage.getItem('theme'); const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches; if (savedTheme) { setTheme(savedTheme); } else { setTheme(prefersDark ? 'dark' : 'light'); } };
       initTheme();
 
-      // --- Countdown Timer Logic ---
       const countdownElements = document.querySelectorAll('.countdown-timer');
       function formatTimeDifference(diffMillis) { const totalSeconds = Math.round(Math.abs(diffMillis / 1000)); if (totalSeconds < 60) { return diffMillis >= 0 ? 'in <1m' : '<1m ago'; } const days = Math.floor(totalSeconds / (3600 * 24)); const hours = Math.floor((totalSeconds % (3600 * 24)) / 3600); const minutes = Math.floor((totalSeconds % 3600) / 60); let parts = []; if (days > 0) parts.push(`${days}d`); if (hours > 0) parts.push(`${hours}h`); if (minutes > 0 || (days === 0 && hours === 0)) parts.push(`${minutes}m`); const timeString = parts.join(' '); return diffMillis >= 0 ? `in ${timeString}` : `${timeString} ago`; }
       function updateCountdowns() { const now = new Date(); countdownElements.forEach(span => { const td = span.closest('td[data-delete-at]'); if (!td) return; const deleteAtISO = td.dataset.deleteAt; if (!deleteAtISO) return; try { const targetDate = new Date(deleteAtISO); if (isNaN(targetDate.getTime())) { throw new Error("Invalid date parsed"); } const diff = targetDate - now; span.textContent = `(${formatTimeDifference(diff)})`; if (diff < 0) { span.classList.add('text-red-500'); } else { span.classList.remove('text-red-500'); } } catch (e) { console.error("Error parsing date for countdown:", deleteAtISO, e); span.textContent = "(invalid date)"; } }); }
       if (countdownElements.length > 0) { updateCountdowns(); const countdownInterval = setInterval(updateCountdowns, 30000); }
 
-      // --- Real-time Log Streaming ---
       const logOutput = document.getElementById('log-output');
       const maxLogLines = 250;
       let initialConnectMessageCleared = false;
