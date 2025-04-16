@@ -3,4 +3,4 @@ requests
 docker
 python-dotenv
 Flask
-waitress # Added for production server
+waitress
