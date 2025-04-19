@@ -1,6 +1,6 @@
 # Use an official Python runtime as a parent image
 # Using slim variant for smaller size
-FROM python:3.13-slim:latest
+FROM python:3.13-slim
 
 # Set environment variables for Python
 ENV PYTHONDONTWRITEBYTECODE=1
