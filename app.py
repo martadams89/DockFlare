@@ -540,9 +540,15 @@ def update_cloudflare_config():
         for hostname, rule_details in managed_rules.items():
             if rule_details.get("status") == "active":
                 service = rule_details.get("service")
-                no_tls_verify = rule_details.get("no_tls_verify", False)
                 if service:
-                    desired_ingress_rules.append({"hostname": hostname, "service": service, "noTLSVerify": no_tls_verify})
+                    no_tls_verify = rule_details.get("no_tls_verify", False)
+                    desired_ingress_rules.append({
+                        "hostname": hostname,
+                        "service": service,
+                        "originRequest": {
+                            "noTLSVerify": no_tls_verify
+                        }
+                    })
                 else:
                     logging.warning(f"Rule {hostname} is active but missing 'service' detail. Skipping.")
 
@@ -557,7 +563,7 @@ def update_cloudflare_config():
         current_cf_ingress = [r for r in current_config.get("ingress", []) if r.get("service") != catch_all_rule["service"]]
 
         def rule_to_canonical(rule):
-            items = sorted([(k, v) for k, v in rule.items() if k in ["hostname", "service", "noTLSVerify"]])
+            items = sorted([(k, v) for k, v in rule.items() if k in ["hostname", "service"]])
             return tuple(items)
 
         try:
@@ -724,7 +730,7 @@ def process_container_start(container):
                 elif existing_rule.get("status") == "active":
                     service_changed = existing_rule.get("service") != service
                     container_changed = existing_rule.get("container_id") != container_id
-                    no_tls_verify_changed = no_tls_verify != existing_rule.get("no_tls_verify", False)
+                    no_tls_verify_changed = existing_rule.get("no_tls_verify") != no_tls_verify
 
                     if container_changed:
                         logging.info(f"Updating container ID for active rule {hostname}: '{existing_rule.get('container_id')[:12]}' -> '{container_id[:12]}'.")
@@ -736,7 +742,7 @@ def process_container_start(container):
                          state_changed_locally = True
                          needs_cf_update = True
                     if no_tls_verify_changed:
-                         logging.info(f"Updating no_tls_verify for active rule {hostname}: '{existing_rule.get('no_tls_verify')}' -> '{no_tls_verify}'.")
+                         logging.info(f"Updating noTLSVerify for active rule {hostname}: '{existing_rule.get('no_tls_verify')}' -> '{no_tls_verify}'.")
                          existing_rule["no_tls_verify"] = no_tls_verify
                          state_changed_locally = True
                          needs_cf_update = True
@@ -1061,7 +1067,7 @@ def reconcile_state():
                     elif rule.get("status") == "active":
                         container_changed = rule.get("container_id") != running_details["container_id"]
                         service_changed = rule.get("service") != running_details["service"]
-                        no_tls_verify_changed = rule.get("no_tls_verify", False) != running_details["no_tls_verify"]
+                        no_tls_verify_changed = rule.get("no_tls_verify") != running_details["no_tls_verify"]
                         if container_changed:
                              logging.info(f"[Reconcile] Updating container ID for active rule {hostname}.");
                              rule["container_id"] = running_details["container_id"]; state_changed_locally = True
@@ -1069,7 +1075,7 @@ def reconcile_state():
                              logging.info(f"[Reconcile] Updating service for active rule {hostname}.");
                              rule["service"] = running_details["service"]; state_changed_locally = True; needs_cf_update = True
                         if no_tls_verify_changed:
-                             logging.info(f"[Reconcile] Updating no_tls_verify for active rule {hostname}.");
+                             logging.info(f"[Reconcile] Updating noTLSVerify for active rule {hostname}.");
                              rule["no_tls_verify"] = running_details["no_tls_verify"]; state_changed_locally = True; needs_cf_update = True
                         if zone_id_changed:
                              logging.warning(f"[Reconcile] Zone ID for active rule {hostname} changed ('{rule.get('zone_id')}' -> '{target_zone_id}'). Updating state.");
