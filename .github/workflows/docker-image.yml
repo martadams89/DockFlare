@@ -10,6 +10,7 @@ on:
     branches:
       - "stable"
       # - "unstable" # Optional: Decide if PRs to nightly should trigger
+  workflow_dispatch:
 
 jobs:
   build:
