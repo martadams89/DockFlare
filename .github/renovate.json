@@ -1,0 +1,16 @@
+{
+  "extends": ["config:base"],
+  "packageRules": [
+    {
+      "matchDatasources": ["docker"],
+      "groupName": "docker dependencies"
+    },
+    {
+      "matchPackageNames": ["cloudflared"],
+      "groupName": "cloudflared version",
+      "datasource": "github-releases",
+      "registryUrls": ["https://github.com/cloudflare/cloudflared"]
+    }
+  ],
+  "schedule": ["before 2am on every weekday"]
+}

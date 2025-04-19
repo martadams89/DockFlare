@@ -1,6 +1,6 @@
 # Use an official Python runtime as a parent image
 # Using slim variant for smaller size
-FROM python:3.13-slim
+FROM python:3.13-slim:latest
 
 # Set environment variables for Python
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -12,7 +12,7 @@ WORKDIR /app
 # Install system dependencies needed for downloading and installing cloudflared
 # Also install cloudflared itself
 # Pinning the version is recommended for reproducibility
-ARG CLOUDFLARED_VERSION=2024.1.5 # Check for the latest stable version if desired
+ARG CLOUDFLARED_VERSION=2025.4.0 # Check for the latest stable version if desired
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     ca-certificates \
