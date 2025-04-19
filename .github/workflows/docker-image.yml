@@ -51,6 +51,6 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64 # Enable multi-architecture builds
-          push: ${{ github.event_name == 'push' && (github.ref_name == 'stable' || github.ref_name == 'unstable') }}
+          push: true # Ensure the image is pushed to the registry
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

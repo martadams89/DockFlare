@@ -1,10 +1,10 @@
 # Use an official Python runtime as a parent image
 # Using slim variant for smaller size
-FROM python:3.9-slim
+FROM python:3.13-slim
 
 # Set environment variables for Python
-ENV PYTHONDONTWRITEBYTECODE 1  # Prevents python from writing pyc files
-ENV PYTHONUNBUFFERED 1         # Prevents python from buffering stdout/stderr
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 # Set the working directory in the container
 WORKDIR /app
