@@ -1431,11 +1431,11 @@ def update_cloudflare_config():
             return tuple(items)
 
         try:
-            current_cf_set = {rule_to_canonical(r) for r in current_cf_ingress if r.get("hostname") and r.get("service")}
-            desired_set = {rule_to_canonical(r) for r in desired_ingress_rules if r.get("hostname") and r.get("service")}
+             current_cf_set = {rule_to_canonical(r) for r in current_cf_ingress if r.get("hostname") and r.get("service")}
+             desired_set = {rule_to_canonical(r) for r in desired_ingress_rules if r.get("hostname") and r.get("service")}
         except Exception as e:
-            logging.error(f"Error creating canonical rule sets for comparison: {e}", exc_info=True)
-            return False
+             logging.error(f"Error creating canonical rule sets for comparison: {e}", exc_info=True)
+             return False
 
         if current_cf_set == desired_set:
             logging.info("No changes detected in CF tunnel config. Skipping API update.")
@@ -1447,41 +1447,90 @@ def update_cloudflare_config():
             needs_api_update = True
             final_ingress_rules = desired_ingress_rules + [catch_all_rule]
 
-    if needs_api_update:
-        logging.info("Updating Cloudflare tunnel ingress configuration...")
+    # Proceed with API update if needed
+    if needs_api_update and final_ingress_rules is not None:
+        logging.info(f"Updating Cloudflare tunnel config with {len(final_ingress_rules) - 1} active rules (+1 catch-all)...")
         endpoint = f"/accounts/{CF_ACCOUNT_ID}/cfd_tunnel/{tunnel_state['id']}/configurations"
-        payload = {"ingress": final_ingress_rules}
-        for attempt in range(MAX_CF_UPDATE_RETRIES):
-            try:
-                cf_api_request("PUT", endpoint, json_data=payload)
-                logging.info("Cloudflare tunnel ingress configuration updated successfully.")
-                return True
-            except requests.exceptions.RequestException as e:
-                logging.error(f"Failed to update CF config (attempt {attempt + 1}/{MAX_CF_UPDATE_RETRIES}): {e}")
-                time.sleep(CF_UPDATE_RETRY_DELAY * (CF_UPDATE_BACKOFF_FACTOR ** attempt))
-        logging.error("Exceeded maximum retries for updating CF config.")
-        return False
+        
+        # Build the complete config object
+        config = {
+            "config": {
+                "ingress": final_ingress_rules,
+                "originRequest": {"connectTimeout": 30, "noTLSVerify": False},
+                "warp-routing": {"enabled": False}
+            }
+        }
+        
+        try:
+            # Use the retry mechanism for Cloudflare updates
+            for attempt in range(MAX_CF_UPDATE_RETRIES):
+                try:
+                    cf_api_request("PUT", endpoint, json_data=config)
+                    logging.info(f"Successfully updated Cloudflare tunnel configuration (attempt {attempt + 1})")
+                    if tunnel_state.get("error") and "config" in tunnel_state.get("error", "").lower():
+                        tunnel_state["error"] = None  # Clear any previous update errors
+                    return True
+                except requests.exceptions.RequestException as e:
+                    if attempt < MAX_CF_UPDATE_RETRIES - 1:
+                        retry_delay = CF_UPDATE_RETRY_DELAY * (CF_UPDATE_BACKOFF_FACTOR ** attempt)
+                        logging.warning(f"CF config update failed (attempt {attempt + 1}/{MAX_CF_UPDATE_RETRIES}), retrying in {retry_delay}s: {e}")
+                        time.sleep(retry_delay)
+                    else:
+                        raise
+            
+            # We shouldn't normally reach here due to the exception in the last iteration
+            return False
+        except requests.exceptions.RequestException as e:
+            logging.error(f"All {MAX_CF_UPDATE_RETRIES} attempts to update CF tunnel config failed: {e}", exc_info=True)
+            tunnel_state["error"] = f"Failed to update tunnel configuration after {MAX_CF_UPDATE_RETRIES} attempts"
+            return False
+        except Exception as e:
+            logging.error(f"Unexpected error updating CF tunnel config: {e}", exc_info=True)
+            tunnel_state["error"] = f"Unexpected error updating tunnel configuration: {e}"
+            return False
+    
+    # If we reached here, either there were no changes or the update was successful
+    return True
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
 @app.after_request
 def add_security_headers(response):
-    """Add security headers to help with reverse proxies and fix CSS loading issues."""
+    """Add comprehensive security headers for better protection and reverse proxy compatibility."""
+    # Basic security headers
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'SAMEORIGIN'
-    response.headers['Content-Security-Policy'] = (
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    
+    # Enhanced Content Security Policy that works with reverse proxies
+    csp = (
         "default-src 'self'; "
-        "style-src 'self' 'unsafe-inline'; "
-        "script-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:; "
+        "connect-src 'self' ws: wss:; " # Allow WebSockets for log streaming
+        "style-src 'self' 'unsafe-inline'; " # Allow inline styles for UI
+        "script-src 'self' 'unsafe-inline'; " # Allow inline scripts for UI functionality
+        "img-src 'self' data: https:; " # Allow data: URLs for SVG images
         "font-src 'self'; "
-        "connect-src 'self'; "
-        "frame-ancestors 'self';"
+        "frame-ancestors 'self'; " # Control embedding in iframes
+        "base-uri 'self'; " # Restrict base URI
+        "form-action 'self'; " # Restrict form submissions
+        "upgrade-insecure-requests; " # Upgrade HTTP to HTTPS when possible
     )
+    response.headers['Content-Security-Policy'] = csp
+    
+    # Additional headers for reverse proxy and protocol awareness
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
-    response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    
+    # Cross-origin headers for API compatibility
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Requested-With, Authorization'
+    
+    # Proxy-related headers to ensure proper protocol detection
+    if request.headers.get('X-Forwarded-Proto'):
+        response.headers['X-Forwarded-Proto'] = request.headers.get('X-Forwarded-Proto')
+    
     return response
 
 def get_display_token(token):
@@ -1551,13 +1600,17 @@ def force_delete_rule(hostname):
         rule_details = managed_rules.get(hostname)
         if rule_details:
             zone_id_for_delete = rule_details.get("zone_id")
+            logging.info(f"Found rule for {hostname} with zone ID: {zone_id_for_delete}")
         else:
             logging.warning(f"Rule {hostname} not found in state during force delete. Attempting DNS delete in default zone ID ({CF_ZONE_ID}) if available.")
             zone_id_for_delete = CF_ZONE_ID
 
-    if zone_id_for_delete and tunnel_state.get("id"):
-        logging.info(f"Attempting immediate DNS record deletion for force-deleted rule: {hostname} in zone {zone_id_for_delete}")
-        dns_delete_success = delete_cloudflare_dns_record(zone_id_for_delete, hostname, tunnel_state["id"])
+    # Handle both external and internal modes
+    tunnel_id = tunnel_state.get("id") or EXTERNAL_TUNNEL_ID
+    
+    if zone_id_for_delete and tunnel_id:
+        logging.info(f"Attempting immediate DNS record deletion for force-deleted rule: {hostname} in zone {zone_id_for_delete} using tunnel {tunnel_id}")
+        dns_delete_success = delete_cloudflare_dns_record(zone_id_for_delete, hostname, tunnel_id)
         if not dns_delete_success:
             logging.error(f"Failed immediate DNS delete for {hostname} in zone {zone_id_for_delete}. Tunnel config update will proceed.")
             cloudflared_agent_state["last_action_status"] = f"Warning: Failed DNS delete for {hostname}. Tunnel update proceeding."
@@ -1578,7 +1631,8 @@ def force_delete_rule(hostname):
             logging.warning(f"Rule '{hostname}' was already removed from state when force delete requested.")
             rule_removed_from_state = True
 
-    if rule_removed_from_state:
+    # Update Cloudflare tunnel config if not in external mode
+    if rule_removed_from_state and not USE_EXTERNAL_CLOUDFLARED:
         logging.info(f"Triggering Cloudflare tunnel config update after force deleting {hostname}.")
         if update_cloudflare_config():
             logging.info(f"CF tunnel config update successful after force deleting {hostname}.")
@@ -1589,6 +1643,15 @@ def force_delete_rule(hostname):
         else:
             logging.error(f"CRITICAL: State updated after force delete of {hostname} (DNS delete success: {dns_delete_success}), but subsequent tunnel config update FAILED!")
             cloudflared_agent_state["last_action_status"] = f"Error: Removed {hostname} locally (DNS delete: {dns_delete_success}), but FAILED tunnel config update! Reconciliation needed."
+    elif rule_removed_from_state and USE_EXTERNAL_CLOUDFLARED:
+        # For external mode, we only handle DNS and local state
+        status_msg = f"Successfully removed rule for {hostname} from local state."
+        if dns_delete_success:
+            status_msg += " DNS record deleted."
+        else:
+            status_msg += " DNS deletion failed or skipped."
+        logging.info(status_msg)
+        cloudflared_agent_state["last_action_status"] = status_msg
 
     time.sleep(1)
     return redirect(url_for('status_page'))
@@ -1636,16 +1699,26 @@ def stream_logs():
         finally:
             logging.debug(f"Log stream {client_id} connection ended")
 
+    # Create response with appropriate MIME type
     response = Response(event_stream(), mimetype='text/event-stream')
 
-    # Enhanced headers for better proxy compatibility
+    # Enhanced headers for better reverse proxy compatibility
     response.headers.update({
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'Pragma': 'no-cache',
         'Expires': '0',
-        'X-Accel-Buffering': 'no',  # For Nginx
-        'Access-Control-Allow-Origin': '*'  # Allow cross-origin access
+        'X-Accel-Buffering': 'no',  # For Nginx reverse proxy
+        'Transfer-Encoding': 'chunked', # Helps with buffering issues
+        'Connection': 'keep-alive',  # Explicitly set keep-alive
+        'Content-Type': 'text/event-stream; charset=utf-8',  # Explicit charset
+        
+        # CORS headers to ensure cross-origin access works
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Requested-With',
+        'Access-Control-Expose-Headers': 'Content-Type'
     })
+    
     return response
 
 def run_background_tasks():
