@@ -18,6 +18,10 @@ services:
       - STATE_FILE_PATH=/app/data/state.json
       - TZ=Europe/Zurich # Set the timezone to Zurich
       
+      # Container Scanning Configuration:
+      # Enable this to scan for labeled containers across ALL Docker networks
+      # - SCAN_ALL_NETWORKS=true
+      
       # External cloudflared Configuration:
       # When using an external cloudflared instance, you need these settings:
       # - USE_EXTERNAL_CLOUDFLARED=true

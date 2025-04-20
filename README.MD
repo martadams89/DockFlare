@@ -221,6 +221,27 @@ This approach gives you more control over how cloudflared runs while letting Doc
 
 ---
 
+## Container Network Scanning
+
+By default, DockFlare only detects containers that are on the same Docker network as itself. If you need to manage containers across multiple networks, you can enable the all-networks scanning feature:
+
+```dotenv
+# --- Network Scanning Configuration ---
+SCAN_ALL_NETWORKS=true
+```
+
+This setting allows DockFlare to:
+- Detect labeled containers across **all** Docker networks
+- Manage ingress rules for containers regardless of their network location
+- Create DNS records for containers in any network
+
+This is particularly useful in complex setups where:
+- You have containers spread across multiple custom networks
+- You're using network isolation for security
+- You need to manage services in network namespaces that DockFlare can't directly join
+
+---
+
 ### Next Steps
 
 1.  **Access the Web UI:**

@@ -368,7 +368,7 @@ def initialize_tunnel():
     tunnel_state["error"] = None
     tunnel_id = None
     token = None
-    
+
     # If external cloudflared is configured, use its tunnel ID
     if USE_EXTERNAL_CLOUDFLARED:
         logging.info("External cloudflared configuration detected")
@@ -376,11 +376,21 @@ def initialize_tunnel():
             tunnel_id = EXTERNAL_TUNNEL_ID
             logging.info(f"Using external tunnel ID: {tunnel_id}")
             tunnel_state["id"] = tunnel_id
-            
+
             # For external tunnels, we don't need the token since we don't manage the container
             # But for DNS record management we need the tunnel ID
             tunnel_state["token"] = None
             tunnel_state["status_message"] = "Using external tunnel (DNS management only)."
+
+            # Ensure containers with DockFlare labels are detected and added to managed rules
+            logging.info("Scanning for containers with DockFlare labels in external mode...")
+            try:
+                containers = docker_client.containers.list(all=SCAN_ALL_NETWORKS)
+                for container in containers:
+                    process_container_start(container)
+            except Exception as e:
+                logging.error(f"Error scanning containers in external mode: {e}", exc_info=True)
+
             logging.info(f"External tunnel '{TUNNEL_NAME}' (ID: {tunnel_id}) initialized for DNS management only.")
             return
         else:
@@ -388,7 +398,7 @@ def initialize_tunnel():
             tunnel_state["status_message"] = "Error: External tunnel config missing tunnel ID."
             tunnel_state["error"] = "External cloudflared enabled but missing tunnel ID"
             return
-    
+
     # Regular tunnel initialization (non-external mode)
     try:
         tunnel_id, token = find_tunnel_via_api(TUNNEL_NAME)
@@ -566,200 +576,17 @@ def delete_cloudflare_dns_record(zone_id, hostname, tunnel_id):
         logging.error(f"Unexpected error deleting DNS record {dns_record_id} for {hostname}: {e}", exc_info=True)
         return False
 
-def update_cloudflare_config():
-    """Updates the Cloudflare tunnel ingress configuration if needed, preserving existing rules."""
-    if not tunnel_state.get("id"):
-        logging.warning("Cannot update CF config, tunnel ID missing.")
-        return False
-
-    final_ingress_rules = None
-    needs_api_update = False
-
-    with state_lock:
-        logging.info("Checking for Cloudflare tunnel config updates...")
-        # Get current configuration from Cloudflare
-        current_config = get_current_cf_config()
-        if current_config is None:
-            logging.error("Failed to fetch current CF config, aborting update check.")
-            return False
-
-        # Extract current ingress rules
-        current_ingress_rules = current_config.get("ingress", [])
-        
-        # Identify the catch-all rule (usually the last one)
-        catch_all_rule = {"service": "http_status:404"}
-        has_catch_all = False
-        preserved_ingress_rules = []
-        
-        # Process existing rules
-        for rule in current_ingress_rules:
-            if rule.get("service") == catch_all_rule["service"]:
-                # This is the catch-all rule - save it for later
-                catch_all_rule = rule  # Preserve any custom settings in the catch-all
-                has_catch_all = True
-            else:
-                # This is a regular rule - preserve it unless we're going to manage it ourselves
-                hostname = rule.get("hostname")
-                if hostname is None or hostname not in managed_rules:
-                    # This is an external rule we should preserve
-                    preserved_ingress_rules.append(rule)
-                # Rules we manage will be added from our state
-        
-        # Create rules for hostnames we manage
-        our_ingress_rules = []
-        for hostname, rule_details in managed_rules.items():
-            if rule_details.get("status") == "active":
-                service = rule_details.get("service")
-                if service:
-                    no_tls_verify = rule_details.get("no_tls_verify", False)
-                    our_ingress_rules.append({
-                        "hostname": hostname,
-                        "service": service,
-                        "originRequest": {
-                            "noTLSVerify": no_tls_verify
-                        }
-                    })
-                else:
-                    logging.warning(f"Rule {hostname} is active but missing 'service' detail. Skipping.")
-        
-        # We need to check if any of our managed rules need to be added or updated
-        current_hostnames = set(rule.get("hostname") for rule in preserved_ingress_rules 
-                              if rule.get("hostname") is not None)
-        our_hostnames = set(rule.get("hostname") for rule in our_ingress_rules 
-                          if rule.get("hostname") is not None)
-        
-        # If our hostnames are different from what exists (for the ones we manage), update is needed
-        needs_api_update = not our_hostnames.issubset(current_hostnames)
-        
-        # If we need to check rule contents, we could do a deeper comparison here
-        if not needs_api_update:
-            # Compare rule contents for hostnames we manage
-            current_rules_by_hostname = {rule.get("hostname"): rule for rule in current_ingress_rules 
-                                       if rule.get("hostname") in our_hostnames}
-            
-            for rule in our_ingress_rules:
-                hostname = rule.get("hostname")
-                if hostname and hostname in current_rules_by_hostname:
-                    current_rule = current_rules_by_hostname[hostname]
-                    if current_rule.get("service") != rule.get("service"):
-                        needs_api_update = True
-                        break
-                    
-                    # Check noTLSVerify settings if present
-                    current_no_tls = (current_rule.get("originRequest", {}) or {}).get("noTLSVerify", False)
-                    our_no_tls = (rule.get("originRequest", {}) or {}).get("noTLSVerify", False)
-                    if current_no_tls != our_no_tls:
-                        needs_api_update = True
-                        break
-        
-        if needs_api_update:
-            logging.info("Change detected. Merging our ingress rules with existing external rules.")
-            
-            # Combine preserved rules and our rules, ensuring no duplicates
-            merged_rules = preserved_ingress_rules.copy()
-            
-            # Add our rules, but avoid duplicating any that might have been caught in preservation
-            for rule in our_ingress_rules:
-                hostname = rule.get("hostname")
-                if hostname:
-                    # Make sure we don't duplicate rules
-                    if not any(r.get("hostname") == hostname for r in merged_rules):
-                        merged_rules.append(rule)
-            
-            # Ensure rules are sorted for consistent output
-            merged_rules.sort(key=lambda x: x.get("hostname", "") if x.get("hostname") else "zzzz")
-            
-            # Always add the catch-all rule at the end
-            if has_catch_all:
-                merged_rules.append(catch_all_rule)
-            else:
-                merged_rules.append({"service": "http_status:404"})
-            
-            final_ingress_rules = merged_rules
-            logging.debug(f"Final merged rules count: {len(final_ingress_rules)}")
-        else:
-            logging.info("No changes detected in CF tunnel config. Skipping API update.")
-
-    if needs_api_update and final_ingress_rules is not None:
-        endpoint = f"/accounts/{CF_ACCOUNT_ID}/cfd_tunnel/{tunnel_state['id']}/configurations"
-        payload = {"config": {"ingress": final_ingress_rules}}
-        last_exception = None
-
-        for attempt in range(MAX_CF_UPDATE_RETRIES + 1):
-            try:
-                logging.info(f"Attempting CF config push (Attempt {attempt + 1}/{MAX_CF_UPDATE_RETRIES + 1})...")
-                cf_api_request("PUT", endpoint, json_data=payload)
-                logging.info("Successfully updated CF tunnel configuration via API.")
-                cloudflared_agent_state["last_action_status"] = f"CF config updated successfully at {datetime.now(timezone.utc).isoformat()}"
-                if tunnel_state.get("error") and ("Failed update tunnel config" in tunnel_state["error"] or "API Error" in tunnel_state["error"]):
-                     logging.info(f"Clearing previous API error related to config update: {tunnel_state['error']}")
-                     tunnel_state["error"] = None
-                return True
-            except requests.exceptions.RequestException as e:
-                last_exception = e
-                status_code = e.response.status_code if e.response is not None else None
-                logging.warning(f"CF API update attempt {attempt + 1} failed: {e} (Status: {status_code})")
-
-                is_retryable = isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)) or status_code in [429, 500, 502, 503, 504]
-
-                if is_retryable and attempt < MAX_CF_UPDATE_RETRIES:
-                    wait_time = CF_UPDATE_RETRY_DELAY * (CF_UPDATE_BACKOFF_FACTOR ** attempt)
-                    wait_time *= (1 + random.uniform(-0.2, 0.2))
-                    wait_time = max(1, wait_time)
-
-                    if status_code == 429 and e.response is not None:
-                         retry_after = e.response.headers.get("Retry-After")
-                         if retry_after:
-                              try:
-                                   wait_time = max(wait_time, int(retry_after))
-                                   logging.info(f"Respecting Retry-After header: {retry_after} seconds.")
-                              except ValueError:
-                                   logging.warning(f"Could not parse Retry-After header value: {retry_after}")
-
-                    logging.info(f"Retrying CF update in {wait_time:.1f} seconds...")
-                    if stop_event.wait(wait_time):
-                        logging.warning("Shutdown requested during CF update retry wait.")
-                        cloudflared_agent_state["last_action_status"] = "Error: CF update aborted (shutdown during retry)."
-                        tunnel_state["error"] = "Failed update tunnel config: aborted retry"
-                        return False
-                    continue
-                else:
-                    logging.error(f"CF API update failed permanently (Retryable: {is_retryable}, Attempt: {attempt + 1}).")
-                    break
-            except Exception as e:
-                last_exception = e
-                logging.error(f"Unexpected error during CF API update attempt {attempt + 1}: {e}", exc_info=True)
-                break
-
-        logging.error(f"Failed to update CF tunnel config after {MAX_CF_UPDATE_RETRIES + 1} attempts.")
-        error_message = f"Failed update tunnel config: {last_exception}"
-        cloudflared_agent_state["last_action_status"] = f"Error: {error_message}"
-        if not tunnel_state.get("error"):
-            tunnel_state["error"] = error_message
-        return False
-
-    elif needs_api_update and final_ingress_rules is None:
-        logging.error("Internal error: update needed but final ingress rules were not generated.")
-        return False
-    else:
-        return True
-
 def process_container_start(container):
     """Processes a container start event based on labels."""
-    if not container: return
+    if not container:
+        return
+
     container_id = None
     container_name = "Unknown"
     try:
         container_id = container.id
-        try:
-             container.reload()
-             container_name = container.name
-        except NotFound:
-             logging.warning(f"Container {container_id[:12]} not found processing start (likely stopped very quickly?).")
-             return
-        except APIError as e:
-             logging.error(f"Docker API error reloading container {container_id[:12]}: {e}")
-             return
+        container.reload()
+        container_name = container.name
 
         labels = container.labels
         enabled_label = f"{LABEL_PREFIX}.enable"
@@ -782,11 +609,11 @@ def process_container_start(container):
             return
 
         if not is_valid_hostname(hostname):
-             logging.warning(f"Ignoring start: {container_name} ({container_id[:12]}): Invalid hostname format '{hostname}'.")
-             return
+            logging.warning(f"Ignoring start: {container_name} ({container_id[:12]}): Invalid hostname format '{hostname}'.")
+            return
         if not is_valid_service(service):
-             logging.warning(f"Ignoring start: {container_name} ({container_id[:12]}): Invalid service format '{service}'. Needs protocol (http/https/tcp/unix) or host:port.")
-             return
+            logging.warning(f"Ignoring start: {container_name} ({container_id[:12]}): Invalid service format '{service}'. Needs protocol (http/https/tcp/unix) or host:port.")
+            return
 
         target_zone_id = None
         if zone_name:
@@ -800,8 +627,8 @@ def process_container_start(container):
             target_zone_id = CF_ZONE_ID
 
         if not target_zone_id:
-             logging.error(f"Cannot manage DNS for {hostname} (container {container_name}): No valid Zone ID found (label lookup failed and no default CF_ZONE_ID set?).")
-             return
+            logging.error(f"Cannot manage DNS for {hostname} (container {container_name}): No valid Zone ID found (label lookup failed and no default CF_ZONE_ID set?).")
+            return
 
         logging.info(f"Managing {hostname} (from {container_name}) in Zone ID: {target_zone_id}")
 
@@ -834,20 +661,20 @@ def process_container_start(container):
                         existing_rule["container_id"] = container_id
                         state_changed_locally = True
                     if service_changed:
-                         logging.info(f"Updating service for active rule {hostname}: '{existing_rule.get('service')}' -> '{service}'.")
-                         existing_rule["service"] = service
-                         state_changed_locally = True
-                         needs_cf_update = True
+                        logging.info(f"Updating service for active rule {hostname}: '{existing_rule.get('service')}' -> '{service}'.")
+                        existing_rule["service"] = service
+                        state_changed_locally = True
+                        needs_cf_update = True
                     if no_tls_verify_changed:
-                         logging.info(f"Updating noTLSVerify for active rule {hostname}: '{existing_rule.get('no_tls_verify')}' -> '{no_tls_verify}'.")
-                         existing_rule["no_tls_verify"] = no_tls_verify
-                         state_changed_locally = True
-                         needs_cf_update = True
+                        logging.info(f"Updating noTLSVerify for active rule {hostname}: '{existing_rule.get('no_tls_verify')}' -> '{no_tls_verify}'.")
+                        existing_rule["no_tls_verify"] = no_tls_verify
+                        state_changed_locally = True
+                        needs_cf_update = True
                     if zone_id_changed:
-                         logging.warning(f"Zone ID for active rule {hostname} changed ('{existing_rule.get('zone_id')}' -> '{target_zone_id}'). DNS in old zone may be stale if cleanup failed.")
-                         existing_rule["zone_id"] = target_zone_id
-                         state_changed_locally = True
-                         needs_cf_update = True
+                        logging.warning(f"Zone ID for active rule {hostname} changed ('{existing_rule.get('zone_id')}' -> '{target_zone_id}'). DNS in old zone may be stale if cleanup failed.")
+                        existing_rule["zone_id"] = target_zone_id
+                        state_changed_locally = True
+                        needs_cf_update = True
             else:
                 logging.info(f"Adding new active rule for hostname: {hostname}")
                 managed_rules[hostname] = {
@@ -872,16 +699,16 @@ def process_container_start(container):
                 if tunnel_state.get("id"):
                     dns_record_id = create_cloudflare_dns_record(target_zone_id, hostname, tunnel_state["id"])
                     if dns_record_id:
-                         logging.info(f"DNS record management in zone {target_zone_id} successful for {hostname}.")
+                        logging.info(f"DNS record management in zone {target_zone_id} successful for {hostname}.")
                     else:
-                         logging.error(f"CRITICAL: Tunnel config updated for {hostname} but failed to create/verify DNS record in zone {target_zone_id}!")
-                         cloudflared_agent_state["last_action_status"] = f"Error: Failed creating DNS for {hostname} in zone {target_zone_id}."
+                        logging.error(f"CRITICAL: Tunnel config updated for {hostname} but failed to create/verify DNS record in zone {target_zone_id}!")
+                        cloudflared_agent_state["last_action_status"] = f"Error: Failed creating DNS for {hostname} in zone {target_zone_id}."
                 else:
-                     logging.error("Missing Tunnel ID - cannot manage DNS record for {hostname}.")
+                    logging.error("Missing Tunnel ID - cannot manage DNS record for {hostname}.")
             else:
                 logging.error(f"Failed to update Cloudflare tunnel config after processing start for {hostname}. DNS record not managed.")
         elif state_changed_locally:
-             logging.debug(f"Local state updated for {hostname} (e.g., container ID), no Cloudflare config change needed.")
+            logging.debug(f"Local state updated for {hostname} (e.g., container ID), no Cloudflare config change needed.")
 
     except NotFound:
         logging.warning(f"Container {container_name} ({container_id[:12] if container_id else 'Unknown'}) not found during start processing.")
@@ -1566,13 +1393,10 @@ app.secret_key = os.urandom(24)
 @app.after_request
 def add_security_headers(response):
     """Add security headers to help with reverse proxies and fix CSS loading issues."""
-    # Very permissive CSP to ensure all resources load through reverse proxies
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'SAMEORIGIN'
-    # Allow everything from CDN for maximum compatibility with reverse proxies
-    response.headers['Content-Security-Policy'] = "default-src * 'unsafe-inline' 'unsafe-eval'; img-src * data:;"
+    response.headers['Content-Security-Policy'] = "default-src 'self' https://cdn.tailwindcss.com https://rsms.me; style-src 'self' 'unsafe-inline' https://rsms.me; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; img-src 'self' data:; font-src 'self' https://rsms.me;"
     response.headers['Referrer-Policy'] = 'no-referrer-when-downgrade'
-    # Fix CORS issues
     response.headers['Access-Control-Allow-Origin'] = '*'
     return response
 
@@ -1693,22 +1517,22 @@ def stream_logs():
         client_id = f"client-{random.randint(1000, 9999)}"
         logging.info(f"Log stream {client_id} connected.")
         yield f"data: --- Log stream connected ---\n\n"
-        
+
         # Send an immediate heartbeat to establish the connection
         yield f"data: heartbeat\n\n"
-        
+
         heartbeat_interval = 10  # More frequent heartbeats (10 seconds)
         last_heartbeat = time.time()
-        
+
         try:
             while True:
                 current_time = time.time()
-                
+
                 # Handle heartbeats more aggressively
                 if current_time - last_heartbeat > heartbeat_interval:
                     yield f"data: heartbeat\n\n"
                     last_heartbeat = current_time
-                    
+
                 try:
                     # Very short timeout to prevent blocking waitress threads
                     log_entry = log_queue.get(timeout=0.5)  
@@ -1717,19 +1541,19 @@ def stream_logs():
                 except queue.Empty:
                     # No log entry available, yield an empty comment to keep connection
                     yield f": keepalive {int(current_time)}\n\n"
-                
+
                 # Brief sleep to yield control back to waitress
                 time.sleep(0.01)
-                
+
         except GeneratorExit:
             logging.info(f"Log stream {client_id} disconnected.")
         except Exception as e:
             logging.error(f"Unexpected error in log stream {client_id}: {e}", exc_info=True)
         finally:
             logging.debug(f"Log stream {client_id} connection ended")
-    
+
     response = Response(event_stream(), mimetype='text/event-stream')
-    
+
     # Enhanced headers for better proxy compatibility
     response.headers.update({
         'Cache-Control': 'no-cache, no-store, must-revalidate',
