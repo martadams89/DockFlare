@@ -17,6 +17,7 @@ services:
     environment:
       - STATE_FILE_PATH=/app/data/state.json
       - TZ=Europe/Zurich # Set the timezone to Zurich
+      - BASE_URL=https://dockflare.example.com # Set the full base URL for the application
 volumes:
   dockflare_data:
 networks:

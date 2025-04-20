@@ -1461,6 +1461,17 @@ app.secret_key = os.urandom(24)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
 logging.info("Reverse proxy support enabled via ProxyFix.")
 
+# Set SERVER_NAME and PREFERRED_URL_SCHEME dynamically based on BASE_URL
+BASE_URL = os.getenv('BASE_URL')
+if BASE_URL:
+    from urllib.parse import urlparse
+    parsed_url = urlparse(BASE_URL)
+    app.config['SERVER_NAME'] = parsed_url.netloc
+    app.config['PREFERRED_URL_SCHEME'] = parsed_url.scheme
+    logging.info(f"Configured SERVER_NAME as {parsed_url.netloc} and PREFERRED_URL_SCHEME as {parsed_url.scheme}.")
+else:
+    logging.warning("BASE_URL not set. Flask may generate incorrect URLs for static assets.")
+
 def get_display_token(token):
     """Returns a truncated token for display."""
     if not token:
