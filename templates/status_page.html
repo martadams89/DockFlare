@@ -5,51 +5,31 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dockflare - Status</title>
     
-    <!-- Tailwind detection element -->
-    <div id="tailwind-loaded-check" class="hidden"></div>
+    <!-- Load compiled Tailwind CSS first (works with reverse proxy) -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='tailwind.css') }}">
     
-    <!-- Primary CDN Tailwind CSS with fallback -->
-    <link rel="stylesheet" href="https://cdn.tailwindcss.com/3.3.5" onerror="document.head.appendChild(Object.assign(document.createElement('link'), {rel: 'stylesheet', href: '{{ url_for('static', filename='tailwind.min.css') }}'}))">
+    <!-- Fallback to CDN if available -->
+    <script src="https://cdn.tailwindcss.com"></script>
     
-    <!-- Local styles that always load -->
-    <link rel="stylesheet" href="{{ url_for('static', filename='dockflare.css') }}">
-    
-    <!-- Inter font -->
     <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
-    
-    <!-- Inline script to detect Tailwind loading -->
     <script>
-      // Check if Tailwind loaded properly
-      window.addEventListener('DOMContentLoaded', function() {
-        setTimeout(function() {
-          var check = document.getElementById('tailwind-loaded-check');
-          var isHidden = window.getComputedStyle(check).display === 'none';
-          if (!isHidden) {
-            document.documentElement.classList.add('tailwind-not-loaded');
-            console.warn('Tailwind CSS not detected. Using fallback styles.');
-          }
-        }, 100); // Short delay to ensure styles are applied
-      });
-      
-      // Tailwind config
-      tailwind.config = {
-        darkMode: 'class',
-        theme: {
-          extend: {
-            colors: {},
-            fontFamily: {
-              sans: ['Inter var', 'system-ui', 'sans-serif'],
-              mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', '"Liberation Mono"', '"Courier New"', 'monospace'],
-            },
-            animation: {
-              'pulse-fast': 'pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+        tailwind.config = {
+          darkMode: 'class',
+          theme: {
+            extend: {
+              colors: {},
+              fontFamily: {
+                sans: ['Inter var', 'system-ui', 'sans-serif'],
+                mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', '"Liberation Mono"', '"Courier New"', 'monospace'],
+              },
+              animation: {
+                'pulse-fast': 'pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+              }
             }
           }
         }
-      }
-    </script>
-    
-    <style type="text/tailwindcss">
+      </script>
+      <style type="text/tailwindcss">
         #log-output .log-status { @apply italic text-gray-400 dark:text-gray-500; }
         #log-output .log-status.error { @apply not-italic text-red-500 dark:text-red-400 font-semibold; }
         #log-output .log-status.connected { @apply not-italic text-green-500 dark:text-green-400; }

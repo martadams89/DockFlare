@@ -1,0 +1,21 @@
+/* Main CSS File with Tailwind Directives */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom styles can be added below */
+html.dark #log-output::-webkit-scrollbar-track {
+  background-color: rgba(31, 41, 55, 0.5);
+}
+
+html.dark #log-output::-webkit-scrollbar-thumb {
+  background-color: rgba(75, 85, 99, 0.5);
+}
+
+#log-output::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(156, 163, 175, 0.7);
+}
+
+html.dark #log-output::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(107, 114, 128, 0.7);
+}

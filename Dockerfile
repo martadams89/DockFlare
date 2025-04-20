@@ -10,13 +10,15 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 # Install system dependencies needed for downloading and installing cloudflared
-# Also install cloudflared itself
+# Also install Node.js and npm for Tailwind CSS compilation
 # Pinning the version is recommended for reproducibility
 # renovate: datasource=github-releases depName=cloudflare/cloudflared versioning=semver
 ENV CLOUDFLARED_VERSION="2024.1.5"
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     ca-certificates \
+    nodejs \
+    npm \
     # Clean up apt cache to reduce image size
     && rm -rf /var/lib/apt/lists/* \
     # Dynamically determine architecture and download the appropriate cloudflared binary
@@ -34,6 +36,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cloudflared --version && \
     mkdir -p /root/.cloudflared && \
     echo "Created /root/.cloudflared directory" # Optional: confirmation log
+
+# Copy Tailwind CSS files
+COPY static/ /app/static/
+COPY tailwind.config.js /app/
+
+# Install Tailwind CSS and build the CSS
+RUN npm install -D tailwindcss@latest postcss@latest autoprefixer@latest && \
+    npx tailwindcss -c tailwind.config.js -i /app/static/main.css -o /app/static/tailwind.css --minify
 
 # Install Python dependencies
 # Copy requirements file first to leverage Docker cache

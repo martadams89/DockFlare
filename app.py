@@ -650,20 +650,21 @@ def update_cloudflare_config():
 
 def process_container_start(container):
     """Processes a container start event based on labels."""
-    if not container: return
+    if not container:
+        return
     container_id = None
     container_name = "Unknown"
     try:
         container_id = container.id
         try:
-             container.reload()
-             container_name = container.name
+            container.reload()
+            container_name = container.name
         except NotFound:
-             logging.warning(f"Container {container_id[:12]} not found processing start (likely stopped very quickly?).")
-             return
+            logging.warning(f"Container {container_id[:12]} not found processing start (likely stopped very quickly?).")
+            return
         except APIError as e:
-             logging.error(f"Docker API error reloading container {container_id[:12]}: {e}")
-             return
+            logging.error(f"Docker API error reloading container {container_id[:12]}: {e}")
+            return
 
         labels = container.labels
         enabled_label = f"{LABEL_PREFIX}.enable"
@@ -686,11 +687,11 @@ def process_container_start(container):
             return
 
         if not is_valid_hostname(hostname):
-             logging.warning(f"Ignoring start: {container_name} ({container_id[:12]}): Invalid hostname format '{hostname}'.")
-             return
+            logging.warning(f"Ignoring start: {container_name} ({container_id[:12]}): Invalid hostname format '{hostname}'.")
+            return
         if not is_valid_service(service):
-             logging.warning(f"Ignoring start: {container_name} ({container_id[:12]}): Invalid service format '{service}'. Needs protocol (http/https/tcp/unix) or host:port.")
-             return
+            logging.warning(f"Ignoring start: {container_name} ({container_id[:12]}): Invalid service format '{service}'. Needs protocol (http/https/tcp/unix) or host:port.")
+            return
 
         target_zone_id = None
         if zone_name:
@@ -704,8 +705,8 @@ def process_container_start(container):
             target_zone_id = CF_ZONE_ID
 
         if not target_zone_id:
-             logging.error(f"Cannot manage DNS for {hostname} (container {container_name}): No valid Zone ID found (label lookup failed and no default CF_ZONE_ID set?).")
-             return
+            logging.error(f"Cannot manage DNS for {hostname} (container {container_name}): No valid Zone ID found (label lookup failed and no default CF_ZONE_ID set?).")
+            return
 
         logging.info(f"Managing {hostname} (from {container_name}) in Zone ID: {target_zone_id}")
 
@@ -738,20 +739,20 @@ def process_container_start(container):
                         existing_rule["container_id"] = container_id
                         state_changed_locally = True
                     if service_changed:
-                         logging.info(f"Updating service for active rule {hostname}: '{existing_rule.get('service')}' -> '{service}'.")
-                         existing_rule["service"] = service
-                         state_changed_locally = True
-                         needs_cf_update = True
+                        logging.info(f"Updating service for active rule {hostname}: '{existing_rule.get('service')}' -> '{service}'.")
+                        existing_rule["service"] = service
+                        state_changed_locally = True
+                        needs_cf_update = True
                     if no_tls_verify_changed:
-                         logging.info(f"Updating noTLSVerify for active rule {hostname}: '{existing_rule.get('no_tls_verify')}' -> '{no_tls_verify}'.")
-                         existing_rule["no_tls_verify"] = no_tls_verify
-                         state_changed_locally = True
-                         needs_cf_update = True
+                        logging.info(f"Updating noTLSVerify for active rule {hostname}: '{existing_rule.get('no_tls_verify')}' -> '{no_tls_verify}'.")
+                        existing_rule["no_tls_verify"] = no_tls_verify
+                        state_changed_locally = True
+                        needs_cf_update = True
                     if zone_id_changed:
-                         logging.warning(f"Zone ID for active rule {hostname} changed ('{existing_rule.get('zone_id')}' -> '{target_zone_id}'). DNS in old zone may be stale if cleanup failed.")
-                         existing_rule["zone_id"] = target_zone_id
-                         state_changed_locally = True
-                         needs_cf_update = True
+                        logging.warning(f"Zone ID for active rule {hostname} changed ('{existing_rule.get('zone_id')}' -> '{target_zone_id}'). DNS in old zone may be stale if cleanup failed.")
+                        existing_rule["zone_id"] = target_zone_id
+                        state_changed_locally = True
+                        needs_cf_update = True
             else:
                 logging.info(f"Adding new active rule for hostname: {hostname}")
                 managed_rules[hostname] = {
@@ -776,16 +777,16 @@ def process_container_start(container):
                 if tunnel_state.get("id"):
                     dns_record_id = create_cloudflare_dns_record(target_zone_id, hostname, tunnel_state["id"])
                     if dns_record_id:
-                         logging.info(f"DNS record management in zone {target_zone_id} successful for {hostname}.")
+                        logging.info(f"DNS record management in zone {target_zone_id} successful for {hostname}.")
                     else:
-                         logging.error(f"CRITICAL: Tunnel config updated for {hostname} but failed to create/verify DNS record in zone {target_zone_id}!")
-                         cloudflared_agent_state["last_action_status"] = f"Error: Failed creating DNS for {hostname} in zone {target_zone_id}."
+                        logging.error(f"CRITICAL: Tunnel config updated for {hostname} but failed to create/verify DNS record in zone {target_zone_id}!")
+                        cloudflared_agent_state["last_action_status"] = f"Error: Failed creating DNS for {hostname} in zone {target_zone_id}."
                 else:
-                     logging.error("Missing Tunnel ID - cannot manage DNS record for {hostname}.")
+                    logging.error("Missing Tunnel ID - cannot manage DNS record for {hostname}.")
             else:
                 logging.error(f"Failed to update Cloudflare tunnel config after processing start for {hostname}. DNS record not managed.")
         elif state_changed_locally:
-             logging.debug(f"Local state updated for {hostname} (e.g., container ID), no Cloudflare config change needed.")
+            logging.debug(f"Local state updated for {hostname} (e.g., container ID), no Cloudflare config change needed.")
 
     except NotFound:
         logging.warning(f"Container {container_name} ({container_id[:12] if container_id else 'Unknown'}) not found during start processing.")
@@ -1454,32 +1455,12 @@ def stop_cloudflared_container():
         logging.info(f"Exiting stop_cloudflared_container function (Success: {success_flag}).")
         return success_flag
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
 app.secret_key = os.urandom(24)
 
 # Apply ProxyFix middleware to handle forwarded headers universally
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
 logging.info("Reverse proxy support enabled via ProxyFix.")
-
-# Set SERVER_NAME and PREFERRED_URL_SCHEME dynamically based on BASE_URL
-BASE_URL = os.getenv('BASE_URL')
-if BASE_URL:
-    from urllib.parse import urlparse
-    parsed_url = urlparse(BASE_URL)
-    app.config['SERVER_NAME'] = parsed_url.netloc
-    app.config['PREFERRED_URL_SCHEME'] = parsed_url.scheme
-    # Force Flask to use external URLs and respect X-Forwarded headers
-    app.config['PREFERRED_URL_SCHEME'] = parsed_url.scheme
-    app.config['APPLICATION_ROOT'] = '/'
-    app.config['USE_X_SENDFILE'] = False
-    
-    # Configure static URL path to work with BASE_URL
-    static_url_path = '/static'
-    app.static_url_path = static_url_path
-    app.static_folder = 'static'
-    logging.info(f"Configured SERVER_NAME as {parsed_url.netloc}, PREFERRED_URL_SCHEME as {parsed_url.scheme}, and static_url_path as {static_url_path}")
-else:
-    logging.warning("BASE_URL not set. Flask may generate incorrect URLs for static assets.")
 
 def get_display_token(token):
     """Returns a truncated token for display."""
@@ -1594,29 +1575,13 @@ def stream_logs():
         logging.info("Log stream client connected.")
         yield f"data: --- Log stream connected ---\n\n"
         try:
-            heartbeat_interval = 15  # Send heartbeat every 15 seconds
-            last_heartbeat = time.time()
-            
             while True:
-                try:
-                    # Try to get a log entry with a short timeout
-                    log_entry = log_queue.get(timeout=1)
-                    yield f"data: {log_entry}\n\n"
-                    last_heartbeat = time.time()  # Reset heartbeat timer after sending real data
-                except queue.Empty:
-                    # Send heartbeat if needed
-                    current_time = time.time()
-                    if current_time - last_heartbeat >= heartbeat_interval:
-                        yield f"data: \n\n"  # Empty data serves as heartbeat
-                        last_heartbeat = current_time
-                    time.sleep(0.1)  # Small sleep to prevent CPU spinning
+                log_entry = log_queue.get(block=True)
+                yield f"data: {log_entry}\n\n"
         except GeneratorExit:
             logging.info("Log stream client disconnected.")
-        except Exception as e:
-            logging.error(f"Unexpected error in log stream: {e}", exc_info=True)
         finally:
-            logging.info("Log stream generator cleanup.")
-            
+            pass
     return Response(event_stream(), mimetype='text/event-stream')
 
 def run_background_tasks():
@@ -1691,12 +1656,7 @@ if __name__ == '__main__':
         flask_thread = threading.Thread(
             target=serve,
             args=(app,),
-            kwargs={
-                'host': '0.0.0.0',
-                'port': 5000,
-                'threads': 8,  # Limit the number of threads to prevent overload
-                'max_request_body_size': 10 * 1024 * 1024  # Set max request body size to 10MB
-            },
+            kwargs={'host':'0.0.0.0','port':5000},
             daemon=True,
             name="FlaskWaitressServer"
         )
@@ -1704,30 +1664,24 @@ if __name__ == '__main__':
         logging.info("Flask server started using waitress on 0.0.0.0:5000.")
 
         while True:
-            try:
-                all_threads_alive = True
-                if flask_thread and not flask_thread.is_alive():
-                    logging.error("Flask server thread terminated unexpectedly!")
-                    all_threads_alive = False
-                if agent_status_thread and not agent_status_thread.is_alive():
-                    logging.warning("Agent status updater thread terminated.")
-                for bg_thread in background_threads:
-                    if bg_thread and not bg_thread.is_alive():
-                        logging.warning(f"{bg_thread.name} thread terminated.")
+             all_threads_alive = True
+             if flask_thread and not flask_thread.is_alive():
+                 logging.error("Flask server thread terminated unexpectedly!")
+                 all_threads_alive = False
+             if agent_status_thread and not agent_status_thread.is_alive():
+                 logging.warning("Agent status updater thread terminated.")
+             for bg_thread in background_threads:
+                 if bg_thread and not bg_thread.is_alive():
+                      logging.warning(f"{bg_thread.name} thread terminated.")
 
-                if not all_threads_alive:
-                    logging.error("A critical thread (Flask server) terminated. Initiating shutdown.")
-                    stop_event.set()
-                    break
-                if stop_event.is_set():
-                    logging.info("Stop event detected by main thread.")
-                    break
-
-                time.sleep(10)
-            except Exception as e:
-                logging.error(f"Unexpected error in main thread monitoring loop: {e}", exc_info=True)
-                stop_event.set()
-                break
+             if not all_threads_alive:
+                 logging.error("A critical thread (Flask server) terminated. Initiating shutdown.")
+                 stop_event.set()
+                 break
+             if stop_event.is_set():
+                 logging.info("Stop event detected by main thread.")
+                 break
+             time.sleep(10)
 
     except ImportError:
         logging.warning("Waitress not found. Using Flask development server (not recommended for production). Install using: pip install waitress")
@@ -1741,8 +1695,6 @@ if __name__ == '__main__':
         stop_event.set()
         logging.info("Stop event set for background tasks.")
 
-        # Give threads a moment to finish gracefully
-        time.sleep(1)
         logging.info("Exiting Dockflare application.")
         exit_code = 1 if tunnel_state.get("error") or cloudflared_agent_state.get("container_status") == "docker_unavailable" else 0
         sys.exit(exit_code)
