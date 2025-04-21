@@ -135,6 +135,85 @@ services:
       - cloudflare-net  # Must be in a network that DockFlare can reach
 ```
 
+### Finding Your Tunnel ID
+
+When using the external cloudflared mode, you'll need to provide the Tunnel ID. Here's how to find it:
+
+1. Log in to your [Cloudflare Dashboard](https://dash.cloudflare.com)
+2. Navigate to **Access** → **Tunnels** in the left sidebar
+3. Find your tunnel in the list and click on it
+4. The Tunnel ID is displayed in two places:
+   - In the URL of the page: `https://dash.cloudflare.com/[account-id]/access/tunnels/view/[tunnel-id]`
+   - In the **Overview** tab under "Tunnel ID"
+5. Copy this ID and set it as your `EXTERNAL_TUNNEL_ID` in the `.env` file
+
+Example Tunnel ID format: `6ff42ae2-765d-4adf-befc-ca51f8e4e688`
+
+### Switching Between Internal and External Cloudflared Modes
+
+If you want to switch from using DockFlare's built-in cloudflared container to an external cloudflared instance, you'll need to perform several cleanup steps to ensure a smooth transition:
+
+1. **Stop the DockFlare container** first:
+   ```bash
+   docker stop dockflare
+   ```
+
+2. **Remove the existing cloudflared agent container** managed by DockFlare:
+   ```bash
+   docker rm -f cloudflared-agent-your_tunnel_name
+   ```
+
+3. **Clean up DNS records in Cloudflare dashboard**:
+   - Navigate to Cloudflare Dashboard → DNS
+   - Find and delete the CNAME records created for your services
+   - These typically have names matching your container hostnames and point to `{tunnel-id}.cfargotunnel.com`
+
+4. **Delete the tunnel in Cloudflare dashboard** (if you're creating a new external tunnel):
+   - Navigate to Cloudflare Dashboard → Access → Tunnels
+   - Find the tunnel created by DockFlare
+   - Click the three dots menu → Delete
+
+5. **Reset the state file** to ensure clean configuration:
+   ```bash
+   # If using Docker volumes
+   docker volume rm dockflare_data
+   # Or if mounted as a file
+   rm /path/to/your/state.json
+   ```
+
+6. **Set up your external cloudflared instance** following Cloudflare's documentation:
+   - Create a new tunnel or use an existing one
+   - Make sure to note the Tunnel ID
+   - Configure and run the cloudflared daemon
+
+7. **Update your .env file** with the external configuration:
+   ```dotenv
+   USE_EXTERNAL_CLOUDFLARED=true
+   EXTERNAL_TUNNEL_ID=your_external_tunnel_id
+   ```
+
+8. **Restart DockFlare** with the new configuration:
+   ```bash
+   docker start dockflare
+   # Or if you removed the volume, you may need to recreate the container
+   docker-compose up -d
+   ```
+
+9. **Verify container discovery** after restart:
+   - Check the Web UI to ensure your containers are detected
+   - Verify that DNS records are created for your services
+   - Test that your services are accessible through the tunnel
+
+After the switch, DockFlare will:
+- Discover containers with the appropriate labels
+- Create new DNS records pointing to your external tunnel
+- Update the ingress configuration for your external tunnel
+- Start with a fresh state based on your running containers
+
+> **Note**: During this transition, your services may experience brief downtime as DNS records are deleted and recreated. The DNS propagation might take some time depending on TTL settings.
+
+> **Important**: When switching to external mode, the tunnel name in your .env file is no longer used, but you still need to specify the correct `EXTERNAL_TUNNEL_ID`.
+
 ## Advanced Configuration
 
 ### Environment Variables
