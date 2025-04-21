@@ -311,157 +311,188 @@
     </footer>
 
     <script>
-      // Enhanced protocol-aware script that runs AFTER DOM loads
-      document.addEventListener('DOMContentLoaded', function() {
-          // Get the current protocol
-          const currentProtocol = window.location.protocol;
-          const currentHost = window.location.host;
-          console.log("DOM loaded with protocol:", currentProtocol);
-          
-          // Fix all form actions to use current protocol
-          document.querySelectorAll('form').forEach(form => {
-              if (!form.getAttribute('class') || !form.getAttribute('class').includes('protocol-aware-form')) {
-                  form.classList.add('protocol-aware-form');
-              }
-              
-              const originalAction = form.getAttribute('action');
-              if (originalAction && originalAction.startsWith('http')) {
-                  try {
-                      const actionUrl = new URL(originalAction);
-                      actionUrl.protocol = currentProtocol;
-                      console.log(`Fixed form action: ${originalAction} → ${actionUrl.toString()}`);
-                      form.setAttribute('action', actionUrl.toString());
-                  } catch (e) {
-                      console.error('Error fixing form action:', e);
-                  }
-              }
-          });
-          
-          // Fix link hrefs that point to our own domain
-          document.querySelectorAll('a[href]').forEach(link => {
-              const href = link.getAttribute('href');
-              if (href && href.startsWith('http')) {
-                  try {
-                      const url = new URL(href);
-                      if (url.host === currentHost) {
-                          url.protocol = currentProtocol;
-                          link.setAttribute('href', url.toString());
-                      }
-                  } catch (e) {
-                      console.error('Error fixing link:', e);
-                  }
-              }
-          });
-      });
-
-      function checkEnvironment() {
-          const currentProtocol = window.location.protocol;
-          const currentHost = window.location.host;
-          const debugUrl = `${currentProtocol}//${currentHost}/debug`;
-          
-          fetch(debugUrl)
-              .then(response => response.json())
-              .then(data => {
-                  console.log("Environment debug info:", data);
-                  alert("Environment debug info has been logged to console.");
-              })
-              .catch(error => {
-                  console.error("Failed to fetch environment info:", error);
-              });
-      }
-
-      function connectEventSource() {
-          if (!window.EventSource) {
-              console.error("EventSource not supported");
-              document.getElementById('log-output').textContent = "Your browser doesn't support Server-Sent Events. Cannot display real-time logs.";
-              return;
-          }
-          
-          // Close existing connection if any
-          if (window.activeLogSource) {
-              try {
-                  window.activeLogSource.close();
-              } catch (e) {
-                  console.error("Error closing existing log stream:", e);
-              }
-              window.activeLogSource = null;
-          }
-          
-          // Always use HTTPS for log streaming when going through reverse proxy
-          const currentProtocol = window.location.protocol;
-          const currentHost = window.location.host;
-          const timestampParam = Date.now(); // Prevent caching
-          const streamUrl = `${currentProtocol}//${currentHost}/stream-logs?t=${timestampParam}`;
-          
-          console.log(`Connecting log stream to: ${streamUrl}`);
-          
-          try {
-              // Create new EventSource
-              window.activeLogSource = new EventSource(streamUrl);
-              
-              // Handle connection opened
-              window.activeLogSource.onopen = function() {
-                  console.log("Log stream connection opened");
-                  addLogLine("--- Log stream connected ---", 'connected');
-              };
-              
-              // Handle incoming messages
-              window.activeLogSource.onmessage = function(event) {
-                  if (event.data === "heartbeat") {
-                      console.log("♥ Heartbeat received");
-                      return;
-                  }
-                  
-                  addLogLine(event.data, 'log');
-              };
-              
-              // Handle errors
-              window.activeLogSource.onerror = function(err) {
-                  console.error("Log stream connection error:", err);
-                  addLogLine("--- Log stream connection error. Reconnecting in 5s... ---", 'error');
-                  
-                  // Clean up
-                  if (window.activeLogSource) {
-                      window.activeLogSource.close();
-                      window.activeLogSource = null;
-                  }
-                  
-                  // Reconnect after delay
-                  setTimeout(connectEventSource, 5000);
-              };
-              
-          } catch (e) {
-              console.error("Error creating EventSource:", e);
-              addLogLine("--- Failed to establish log stream connection ---", 'error');
-              setTimeout(connectEventSource, 5000);
-          }
-          
-          // Ensure cleanup on page unload
-          window.addEventListener('beforeunload', function() {
-              if (window.activeLogSource) {
-                  window.activeLogSource.close();
-              }
-          });
-      }
-
-      const themeToggleButton = document.getElementById('theme-toggle');
-      const themeToggleIcon = themeToggleButton.querySelector('span');
-      const htmlElement = document.documentElement;
-      const setTheme = (theme) => { localStorage.setItem('theme', theme); if (theme === 'dark') { htmlElement.classList.add('dark'); themeToggleIcon.textContent = '☀️'; } else { htmlElement.classList.remove('dark'); themeToggleIcon.textContent = '🌓'; } };
-      const toggleTheme = () => { const currentTheme = localStorage.getItem('theme') || (htmlElement.classList.contains('dark') ? 'dark' : 'light'); const newTheme = currentTheme === 'dark' ? 'light' : 'dark'; setTheme(newTheme); };
-      themeToggleButton.addEventListener('click', toggleTheme);
-      const initTheme = () => { const savedTheme = localStorage.getItem('theme'); const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches; if (savedTheme) { setTheme(savedTheme); } else { setTheme(prefersDark ? 'dark' : 'light'); } };
-      initTheme();
-
-      const countdownElements = document.querySelectorAll('.countdown-timer');
-      function formatTimeDifference(diffMillis) { const totalSeconds = Math.round(Math.abs(diffMillis / 1000)); if (totalSeconds < 60) { return diffMillis >= 0 ? 'in <1m' : '<1m ago'; } const days = Math.floor(totalSeconds / (3600 * 24)); const hours = Math.floor((totalSeconds % (3600 * 24)) / 3600); const minutes = Math.floor((totalSeconds % 3600) / 60); let parts = []; if (days > 0) parts.push(`${days}d`); if (hours > 0) parts.push(`${hours}h`); if (minutes > 0 || (days === 0 && hours === 0)) parts.push(`${minutes}m`); const timeString = parts.join(' '); return diffMillis >= 0 ? `in ${timeString}` : `${timeString} ago`; }
-      function updateCountdowns() { const now = new Date(); countdownElements.forEach(span => { const td = span.closest('td[data-delete-at]'); if (!td) return; const deleteAtISO = td.dataset.deleteAt; if (!deleteAtISO) return; try { const targetDate = new Date(deleteAtISO); if (isNaN(targetDate.getTime())) { throw new Error("Invalid date parsed"); } const diff = targetDate - now; span.textContent = `(${formatTimeDifference(diff)})`; if (diff < 0) { span.classList.add('text-red-500'); } else { span.classList.remove('text-red-500'); } } catch (e) { console.error("Error parsing date for countdown:", deleteAtISO, e); span.textContent = "(invalid date)"; } }); }
-      if (countdownElements.length > 0) { updateCountdowns(); const countdownInterval = setInterval(updateCountdowns, 30000); }
-
-      const logOutput = document.getElementById('log-output');
-      const maxLogLines = 250;
-      let initialConnectMessageCleared = false;
-      function addLogLine(message, type = 'log') {
+        // Enhanced protocol-aware script that runs AFTER DOM loads
+        document.addEventListener('DOMContentLoaded', function() {
+            // Get the current protocol
+            const currentProtocol = window.location.protocol;
+            const currentHost = window.location.host;
+            console.log("DOM loaded with protocol:", currentProtocol);
+            
+            // Fix all form actions to ensure they use the right protocol and method
+            document.querySelectorAll('form').forEach(form => {
+                // Mark form as processed
+                if (!form.getAttribute('class') || !form.getAttribute('class').includes('protocol-aware-form')) {
+                    form.classList.add('protocol-aware-form');
+                }
+                
+                // Ensure the form has a proper action URL
+                if (form.getAttribute('action')) {
+                    // Get original action URL
+                    let actionUrl = form.getAttribute('action');
+                    
+                    // If it's a relative URL, make it absolute using the current protocol and host
+                    if (actionUrl.startsWith('/')) {
+                        actionUrl = `${currentProtocol}//${currentHost}${actionUrl}`;
+                        form.setAttribute('action', actionUrl);
+                        console.log(`Fixed relative form action to: ${actionUrl}`);
+                    }
+                    // If it has a protocol specified, ensure it matches the current one
+                    else if (actionUrl.startsWith('http')) {
+                        try {
+                            const parsedUrl = new URL(actionUrl);
+                            if (parsedUrl.host === currentHost && parsedUrl.protocol !== currentProtocol) {
+                                parsedUrl.protocol = currentProtocol;
+                                form.setAttribute('action', parsedUrl.toString());
+                                console.log(`Fixed protocol in form action: ${actionUrl} → ${parsedUrl.toString()}`);
+                            }
+                        } catch (e) {
+                            console.error('Error fixing form action URL:', e);
+                        }
+                    }
+                }
+                
+                // Add event listener for form submission to catch and fix issues
+                form.addEventListener('submit', function(event) {
+                    // Get form action from the form element
+                    const formAction = this.getAttribute('action');
+                    
+                    if (formAction) {
+                        // Check if the form is using the correct protocol
+                        if (formAction.startsWith('http:') && window.location.protocol === 'https:') {
+                            event.preventDefault();
+                            this.setAttribute('action', formAction.replace('http:', 'https:'));
+                            console.log('Fixed http: to https: in form submission');
+                            this.submit();
+                        }
+                    }
+                });
+            });
+            
+            // Fix link hrefs that point to our own domain
+            document.querySelectorAll('a[href]').forEach(link => {
+                const href = link.getAttribute('href');
+                if (href && href.startsWith('http')) {
+                    try {
+                        const url = new URL(href);
+                        if (url.host === currentHost) {
+                            url.protocol = currentProtocol;
+                            link.setAttribute('href', url.toString());
+                        }
+                    } catch (e) {
+                        console.error('Error fixing link:', e);
+                    }
+                }
+            });
+        });
+    
+        function checkEnvironment() {
+            const currentProtocol = window.location.protocol;
+            const currentHost = window.location.host;
+            const debugUrl = `${currentProtocol}//${currentHost}/debug`;
+            
+            fetch(debugUrl)
+                .then(response => response.json())
+                .then(data => {
+                    console.log("Environment debug info:", data);
+                    alert("Environment debug info has been logged to console.");
+                })
+                .catch(error => {
+                    console.error("Failed to fetch environment info:", error);
+                });
+        }
+    
+        function connectEventSource() {
+            if (!window.EventSource) {
+                console.error("EventSource not supported");
+                document.getElementById('log-output').textContent = "Your browser doesn't support Server-Sent Events. Cannot display real-time logs.";
+                return;
+            }
+            
+            // Close existing connection if any
+            if (window.activeLogSource) {
+                try {
+                    window.activeLogSource.close();
+                } catch (e) {
+                    console.error("Error closing existing log stream:", e);
+                }
+                window.activeLogSource = null;
+            }
+            
+            // Always use HTTPS for log streaming when going through reverse proxy
+            const currentProtocol = window.location.protocol;
+            const currentHost = window.location.host;
+            const timestampParam = Date.now(); // Prevent caching
+            const streamUrl = `${currentProtocol}//${currentHost}/stream-logs?t=${timestampParam}`;
+            
+            console.log(`Connecting log stream to: ${streamUrl}`);
+            
+            try {
+                // Create new EventSource
+                window.activeLogSource = new EventSource(streamUrl);
+                
+                // Handle connection opened
+                window.activeLogSource.onopen = function() {
+                    console.log("Log stream connection opened");
+                    addLogLine("--- Log stream connected ---", 'connected');
+                };
+                
+                // Handle incoming messages
+                window.activeLogSource.onmessage = function(event) {
+                    if (event.data === "heartbeat") {
+                        console.log("♥ Heartbeat received");
+                        return;
+                    }
+                    
+                    addLogLine(event.data, 'log');
+                };
+                
+                // Handle errors
+                window.activeLogSource.onerror = function(err) {
+                    console.error("Log stream connection error:", err);
+                    addLogLine("--- Log stream connection error. Reconnecting in 5s... ---", 'error');
+                    
+                    // Clean up
+                    if (window.activeLogSource) {
+                        window.activeLogSource.close();
+                        window.activeLogSource = null;
+                    }
+                    
+                    // Reconnect after delay
+                    setTimeout(connectEventSource, 5000);
+                };
+                
+            } catch (e) {
+                console.error("Error creating EventSource:", e);
+                addLogLine("--- Failed to establish log stream connection ---", 'error');
+                setTimeout(connectEventSource, 5000);
+            }
+            
+            // Ensure cleanup on page unload
+            window.addEventListener('beforeunload', function() {
+                if (window.activeLogSource) {
+                    window.activeLogSource.close();
+                }
+            });
+        }
+    
+        const themeToggleButton = document.getElementById('theme-toggle');
+        const themeToggleIcon = themeToggleButton.querySelector('span');
+        const htmlElement = document.documentElement;
+        const setTheme = (theme) => { localStorage.setItem('theme', theme); if (theme === 'dark') { htmlElement.classList.add('dark'); themeToggleIcon.textContent = '☀️'; } else { htmlElement.classList.remove('dark'); themeToggleIcon.textContent = '🌓'; } };
+        const toggleTheme = () => { const currentTheme = localStorage.getItem('theme') || (htmlElement.classList.contains('dark') ? 'dark' : 'light'); const newTheme = currentTheme === 'dark' ? 'light' : 'dark'; setTheme(newTheme); };
+        themeToggleButton.addEventListener('click', toggleTheme);
+        const initTheme = () => { const savedTheme = localStorage.getItem('theme'); const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches; if (savedTheme) { setTheme(savedTheme); } else { setTheme(prefersDark ? 'dark' : 'light'); } };
+        initTheme();
+    
+        const countdownElements = document.querySelectorAll('.countdown-timer');
+        function formatTimeDifference(diffMillis) { const totalSeconds = Math.round(Math.abs(diffMillis / 1000)); if (totalSeconds < 60) { return diffMillis >= 0 ? 'in <1m' : '<1m ago'; } const days = Math.floor(totalSeconds / (3600 * 24)); const hours = Math.floor((totalSeconds % (3600 * 24)) / 3600); const minutes = Math.floor((totalSeconds % 3600) / 60); let parts = []; if (days > 0) parts.push(`${days}d`); if (hours > 0) parts.push(`${hours}h`); if (minutes > 0 || (days === 0 && hours === 0)) parts.push(`${minutes}m`); const timeString = parts.join(' '); return diffMillis >= 0 ? `in ${timeString}` : `${timeString} ago`; }
+        function updateCountdowns() { const now = new Date(); countdownElements.forEach(span => { const td = span.closest('td[data-delete-at]'); if (!td) return; const deleteAtISO = td.dataset.deleteAt; if (!deleteAtISO) return; try { const targetDate = new Date(deleteAtISO); if (isNaN(targetDate.getTime())) { throw new Error("Invalid date parsed"); } const diff = targetDate - now; span.textContent = `(${formatTimeDifference(diff)})`; if (diff < 0) { span.classList.add('text-red-500'); } else { span.classList.remove('text-red-500'); } } catch (e) { console.error("Error parsing date for countdown:", deleteAtISO, e); span.textContent = "(invalid date)"; } }); }
+        if (countdownElements.length > 0) { updateCountdowns(); const countdownInterval = setInterval(updateCountdowns, 30000); }
+    
+        const logOutput = document.getElementById('log-output');
+        const maxLogLines = 250;
+        let initialConnectMessageCleared = false;
+        function addLogLine(message, type = 'log') {
             if (!initialConnectMessageCleared && logOutput.textContent.includes('Connecting to log stream...')) { logOutput.textContent = ''; initialConnectMessageCleared = true; }
             const newLogLine = document.createElement('div');
             newLogLine.textContent = message;
@@ -473,45 +504,45 @@
             logOutput.appendChild(newLogLine);
             while (logOutput.childNodes.length > maxLogLines) { logOutput.removeChild(logOutput.firstChild); }
             if (isScrolledToBottom) { logOutput.scrollTop = logOutput.scrollHeight; }
-      }
-
-      // Keep-alive ping mechanism
-      let pingInterval;
-      
-      function startServerPing() {
-          // Clear any existing interval
-          if (pingInterval) {
-              clearInterval(pingInterval);
-          }
-          
-          // Check server reachability every 30 seconds
-          pingInterval = setInterval(() => {
-              const currentProtocol = window.location.protocol;
-              const currentHost = window.location.host;
-              const pingUrl = `${currentProtocol}//${currentHost}/ping?t=${new Date().getTime()}`;
-              
-              fetch(pingUrl)
-                  .then(response => response.json())
-                  .then(data => {
-                      console.log("Server ping successful:", data);
-                      
-                      // If we have no active log source but server is reachable, reconnect
-                      if (!window.activeLogSource || window.activeLogSource.readyState === 2) {
-                          console.log("Server reachable but no active log connection. Reconnecting...");
-                          connectEventSource();
-                      }
-                  })
-                  .catch(error => {
-                      console.error("Server ping failed:", error);
-                  });
-          }, 30000);
-      }
-      
-      // Start pinging server to maintain connection awareness
-      startServerPing();
-      
-      // Connect to log stream
-      connectEventSource();
+        }
+    
+        // Keep-alive ping mechanism
+        let pingInterval;
+        
+        function startServerPing() {
+            // Clear any existing interval
+            if (pingInterval) {
+                clearInterval(pingInterval);
+            }
+            
+            // Check server reachability every 30 seconds
+            pingInterval = setInterval(() => {
+                const currentProtocol = window.location.protocol;
+                const currentHost = window.location.host;
+                const pingUrl = `${currentProtocol}//${currentHost}/ping?t=${new Date().getTime()}`;
+                
+                fetch(pingUrl)
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log("Server ping successful:", data);
+                        
+                        // If we have no active log source but server is reachable, reconnect
+                        if (!window.activeLogSource || window.activeLogSource.readyState === 2) {
+                            console.log("Server reachable but no active log connection. Reconnecting...");
+                            connectEventSource();
+                        }
+                    })
+                    .catch(error => {
+                        console.error("Server ping failed:", error);
+                    });
+            }, 30000);
+        }
+        
+        // Start pinging server to maintain connection awareness
+        startServerPing();
+        
+        // Connect to log stream
+        connectEventSource();
     </script>
 
 </body>

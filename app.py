@@ -1692,32 +1692,89 @@ def ping():
     """Simple ping endpoint to check server availability."""
     return jsonify({
         "status": "ok",
-        "timestamp": int(time.time())
+        "timestamp": int(time.time()),
+        "version": "1.0", 
+        "protocol": request.environ.get('wsgi.url_scheme', 'unknown')
     })
 
 @app.route('/debug')
 def debug_info():
     """Return debugging information about the environment."""
-    headers = {k: v for k, v in request.headers.items()}
-    
-    return jsonify({
-        "request": {
-            "scheme": request.scheme,
-            "is_secure": request.is_secure,
-            "host": request.host,
-            "path": request.path,
-            "url": request.url,
-            "headers": headers
-        },
-        "environment": {
-            "wsgi.url_scheme": request.environ.get('wsgi.url_scheme'),
-            "HTTP_X_FORWARDED_PROTO": request.environ.get('HTTP_X_FORWARDED_PROTO'),
-            "HTTP_X_FORWARDED_HOST": request.environ.get('HTTP_X_FORWARDED_HOST'),
-            "SERVER_NAME": request.environ.get('SERVER_NAME'),
-            "SERVER_PORT": request.environ.get('SERVER_PORT')
-        },
-        "timestamp": int(time.time())
-    })
+    try:
+        headers = {k: v for k, v in request.headers.items()}
+        
+        return jsonify({
+            "request": {
+                "scheme": request.scheme,                // Fix for protocol-aware form submission
+                document.addEventListener('DOMContentLoaded', function() {
+                    // Fix all form actions to ensure they use the right protocol and method
+                    document.querySelectorAll('form').forEach(form => {
+                        // Ensure the form has a proper action URL
+                        if (form.getAttribute('action')) {
+                            const currentProtocol = window.location.protocol;
+                            const currentHost = window.location.host;
+                            
+                            // Get original action URL
+                            let actionUrl = form.getAttribute('action');
+                            
+                            // If it's a relative URL, make it absolute using the current protocol and host
+                            if (actionUrl.startsWith('/')) {
+                                actionUrl = `${currentProtocol}//${currentHost}${actionUrl}`;
+                                form.setAttribute('action', actionUrl);
+                                console.log(`Fixed relative form action to: ${actionUrl}`);
+                            }
+                            // If it has a protocol specified, ensure it matches the current one
+                            else if (actionUrl.startsWith('http')) {
+                                try {
+                                    const parsedUrl = new URL(actionUrl);
+                                    if (parsedUrl.host === currentHost && parsedUrl.protocol !== currentProtocol) {
+                                        parsedUrl.protocol = currentProtocol;
+                                        form.setAttribute('action', parsedUrl.toString());
+                                        console.log(`Fixed protocol in form action: ${actionUrl} → ${parsedUrl.toString()}`);
+                                    }
+                                } catch (e) {
+                                    console.error('Error fixing form action URL:', e);
+                                }
+                            }
+                        }
+                        
+                        // Add event listener for form submission to catch and fix issues
+                        form.addEventListener('submit', function(event) {
+                            // Get form action from the form element
+                            const formAction = this.getAttribute('action');
+                            
+                            if (formAction) {
+                                // Check if the form is using the correct protocol
+                                if (formAction.startsWith('http:') && window.location.protocol === 'https:') {
+                                    event.preventDefault();
+                                    this.setAttribute('action', formAction.replace('http:', 'https:'));
+                                    console.log('Fixed http: to https: in form submission');
+                                    this.submit();
+                                }
+                            }
+                        });
+                    });
+                });
+                "is_secure": request.is_secure,
+                "host": request.host,
+                "path": request.path,
+                "url": request.url,
+                "headers": headers
+            },
+            "environment": {
+                "wsgi.url_scheme": request.environ.get('wsgi.url_scheme'),
+                "HTTP_X_FORWARDED_PROTO": request.environ.get('HTTP_X_FORWARDED_PROTO'),
+                "HTTP_X_FORWARDED_HOST": request.environ.get('HTTP_X_FORWARDED_HOST'),
+                "SERVER_NAME": request.environ.get('SERVER_NAME'),
+                "SERVER_PORT": request.environ.get('SERVER_PORT')
+            },
+            "timestamp": int(time.time())
+        })
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
 
 @app.route('/start-tunnel', methods=['POST'])
 def start_tunnel():
@@ -1735,9 +1792,16 @@ def stop_tunnel():
     time.sleep(1)
     return redirect(url_for('status_page'))
 
-@app.route('/force_delete_rule/<hostname>', methods=['POST'])
+@app.route('/force_delete_rule/<hostname>', methods=['POST', 'GET'])
 def force_delete_rule(hostname):
-    """Handles request to immediately delete a rule and its DNS record."""
+    """Force delete a rule with improved method handling."""
+    # HTTP method validation with better error handling
+    if request.method != 'POST':
+        # Return a more helpful error for GET requests
+        flash("Delete operations require a POST request. If you're seeing this message, there may be an issue with your browser's form submission.", "error")
+        return redirect(url_for('status_page'))
+        
+    # Existing code continues below
     logging.info(f"UI request: Force delete rule for hostname: {hostname}")
     rule_removed_from_state = False
     dns_delete_success = False
@@ -1806,23 +1870,21 @@ def force_delete_rule(hostname):
 @app.route('/stream-logs')
 def stream_logs():
     """Stream logs using Server-Sent Events with proper context handling."""
-    # Generate a unique client ID in the request context
     client_id = f"client-{random.randint(1000, 9999)}"
     logging.info(f"New log stream request from {client_id}")
     
     def generate():
-        """Generator function that yields log entries without using Flask request object."""
-        logging.info(f"Starting event stream for client {client_id}")
-        
-        # Send welcome message
-        yield f"data: --- Log stream connected (client {client_id}) ---\n\n"
-        yield f"data: heartbeat\n\n"
-        
-        # Use shorter heartbeat interval for more responsive connection
-        heartbeat_interval = 3
-        last_heartbeat = time.time()
-
         try:
+            logging.info(f"Starting event stream for client {client_id}")
+            
+            # Send welcome message
+            yield f"data: --- Log stream connected (client {client_id}) ---\n\n"
+            yield f"data: heartbeat\n\n"
+            
+            # Use shorter heartbeat interval for more responsive connection
+            heartbeat_interval = 3
+            last_heartbeat = time.time()
+
             while True:
                 current_time = time.time()
                 
@@ -1843,10 +1905,9 @@ def stream_logs():
                 # Short sleep to prevent CPU usage
                 time.sleep(0.05)
                 
-        except GeneratorExit:
-            logging.info(f"Client {client_id} disconnected")
         except Exception as e:
             logging.error(f"Error in log stream for {client_id}: {e}", exc_info=True)
+            yield f"data: Error in log stream: {str(e)}\n\n"
         finally:
             logging.info(f"Event stream for {client_id} ended")
 
@@ -1855,11 +1916,15 @@ def stream_logs():
     
     # Set headers needed for streaming
     response.headers.update({
-        'Cache-Control': 'no-cache',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0',
         'Connection': 'keep-alive',
         'X-Accel-Buffering': 'no',
-        'Content-Type': 'text/event-stream',
-        'Access-Control-Allow-Origin': '*'
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type'
     })
     
     return response
