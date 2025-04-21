@@ -134,7 +134,15 @@
                 <div class="mb-6">
                     <h4 class="text-md font-semibold mb-3 text-gray-600 dark:text-gray-400">Tunnel Details</h4>
                     <div class="space-y-2 text-sm">
-                        <p><strong class="inline-block w-36">Desired Name:</strong> <code class="bg-gray-200 dark:bg-gray-700 text-indigo-700 dark:text-indigo-300 px-1.5 py-0.5 rounded font-mono text-xs">{{ tunnel_state.name }}</code></p>
+                        <div>
+                            <strong class="inline-block w-36 align-top pt-1">Desired Name:</strong>
+                            {% if external_cloudflared %}
+                                <pre class="inline-block bg-gray-100 dark:bg-gray-900/50 border border-gray-300 dark:border-gray-600 rounded p-2 text-xs font-mono overflow-x-auto whitespace-pre-wrap break-words align-top shadow-inner max-w-full mt-1 sm:mt-0">Not available</pre>
+                                <span class="text-xs text-gray-500 dark:text-gray-400 block mt-1 ml-36">(Using external cloudflared)</span>
+                            {% else %}
+                                <code class="bg-gray-200 dark:bg-gray-700 text-indigo-700 dark:text-indigo-300 px-1.5 py-0.5 rounded font-mono text-xs">{{ tunnel_state.name }}</code>
+                            {% endif %}
+                        </div>
                         <p><strong class="inline-block w-36">Tunnel ID:</strong> <code class="bg-gray-200 dark:bg-gray-700 text-indigo-700 dark:text-indigo-300 px-1.5 py-0.5 rounded font-mono text-xs">{{ tunnel_state.id if tunnel_state.id else 'N/A' }}</code></p>
                         <div>
                             <strong class="inline-block w-36 align-top pt-1">Tunnel Token:</strong>
