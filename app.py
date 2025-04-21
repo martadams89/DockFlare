@@ -495,8 +495,48 @@ def get_current_cf_config():
         return None
 
 def is_valid_hostname(hostname):
-    if not hostname: return False
-    return re.match(r"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$", hostname) is not None
+    """
+    Validates a hostname, including support for wildcards.
+    Accepts standard hostnames and wildcard domains like *.example.com
+    """
+    if not hostname:
+        return False
+        
+    # Handle wildcard domains (*.example.com)
+    if hostname.startswith('*.'):
+        # Remove the wildcard part and validate the rest as a normal domain
+        domain_part = hostname[2:]  # Skip the *. prefix
+        
+        # Domain validation for the rest
+        if not domain_part or len(domain_part) > 253:
+            return False
+            
+        for label in domain_part.split('.'):
+            if not label or len(label) > 63:
+                return False
+            if not all(c.isalnum() or c == '-' for c in label):
+                return False
+            if label.startswith('-') or label.endswith('-'):
+                return False
+                
+        return True
+        
+    # Standard hostname validation (unchanged)
+    if len(hostname) > 253:
+        return False
+    
+    labels = hostname.split('.')
+    
+    # Check each label
+    for label in labels:
+        if not label or len(label) > 63:
+            return False
+        if not all(c.isalnum() or c == '-' for c in label):
+            return False
+        if label.startswith('-') or label.endswith('-'):
+            return False
+    
+    return True
 
 def is_valid_service(service):
     if not service: return False

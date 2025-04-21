@@ -20,6 +20,7 @@ DockFlare automates Cloudflare Tunnel ingress rule management based on Docker co
   - Monitors Docker events for containers with labels (prefix: `cloudflare.tunnel.`): `enable="true"`, `hostname="subdomain.example.com"`, `service="http://target:port"`.
   - Automatically updates Cloudflare Tunnel configuration to match running, labeled containers.
 - **Multi-Domain Support**: Configure multiple domains for a single container using indexed labels, each with its own service target and zone configuration.
+- **Wildcard Support**: Fully supportive of Wildcard subdomains.
 - **Graceful Deletion**: Configurable grace period before removing ingress rules when a container stops.
 - **State Persistence**: Saves `managed_rules` to `state.json` for restarts.
 - **Optimized Reconciliation**: 

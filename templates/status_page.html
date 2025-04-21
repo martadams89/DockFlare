@@ -255,6 +255,11 @@
                                             <a href="https://{{ hostname }}" target="_blank" rel="noopener noreferrer" title="Open https://{{ hostname }}" class="text-sm font-medium text-indigo-600 hover:text-indigo-900 dark:text-indigo-400 dark:hover:text-indigo-200 hover:underline">
                                                 <code>{{ hostname }}</code>
                                             </a>
+                                            {% if hostname.startswith('*.') %}
+                                            <span class="ml-2 px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800 dark:bg-blue-800/30 dark:text-blue-300">
+                                                wildcard
+                                            </span>
+                                            {% endif %}
                                         </td>
                                         <td class="px-6 py-4 whitespace-nowrap">
                                             <code class="text-sm text-gray-700 dark:text-gray-300 font-mono">{{ details.service }}</code>
