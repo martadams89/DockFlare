@@ -20,7 +20,6 @@ DockFlare automates Cloudflare Tunnel ingress rule management based on Docker co
   - Monitors Docker events for containers with labels (prefix: `cloudflare.tunnel.`): `enable="true"`, `hostname="subdomain.example.com"`, `service="http://target:port"`.
   - Automatically updates Cloudflare Tunnel configuration to match running, labeled containers.
 - **Multi-Domain Support**: Configure multiple domains for a single container using indexed labels, each with its own service target and zone configuration.
-- **Wildcard Support**: Fully supportive of Wildcard subdomains.
 - **Graceful Deletion**: Configurable grace period before removing ingress rules when a container stops.
 - **State Persistence**: Saves `managed_rules` to `state.json` for restarts.
 - **Optimized Reconciliation**: 
@@ -272,7 +271,7 @@ After the switch, DockFlare will:
 |----------|-------------|---------|
 | `CF_API_TOKEN` | Cloudflare API token | (Required) |
 | `CF_ACCOUNT_ID` | Cloudflare account ID | (Required) |
-| `CF_ZONE_ID` | Default Cloudflare zone ID | (Required unless using `zonename` label) |
+| `CF_ZONE_ID` | Default/fallback Cloudflare zone ID | (Required unless all containers use `zonename` label) |
 | `TUNNEL_NAME` | Name for the Cloudflare tunnel | dockflared-tunnel (Required unless using external tunnel) |
 | `GRACE_PERIOD_SECONDS` | Time before removing rules after container stops | 28800 (8 hours) |
 | `CLEANUP_INTERVAL_SECONDS` | Interval for checking expired rules | 300 (5 minutes) |
@@ -313,18 +312,53 @@ DockFlare provides real-time logs using Server-Sent Events (SSE). Open the "Real
 
 ### DNS Zone Management
 
-By default, DockFlare uses the `CF_ZONE_ID` specified in your environment variables for all DNS records. However, you can specify different zones for individual containers using the `cloudflare.tunnel.zonename` label. This allows you to expose services across multiple domains.
+DockFlare supports hosting services across multiple Cloudflare zones (domains). There are two ways to specify which zone a hostname belongs to:
+
+1. **Container-specific zone using labels**: Use the `cloudflare.tunnel.zonename` label to specify the zone name for a specific hostname. DockFlare will look up the zone ID automatically.
+
+2. **Default zone using environment variable**: Set the `CF_ZONE_ID` environment variable as a fallback for any hostname that doesn't specify a `zonename` label.
+
+For multi-domain setups, you have two options:
+- **Option 1**: Set `CF_ZONE_ID` to your primary domain's Zone ID, and use `zonename` labels only for hostnames in other zones
+- **Option 2**: Always specify `zonename` labels for all hostnames, making the `CF_ZONE_ID` environment variable optional
+
+> **Note**: When using wildcard domains like `*.example.com`, ensure you're using the correct zone, either via the `zonename` label or the default `CF_ZONE_ID`.
 
 ```yaml
 services:
   my-service:
     # ...other configuration...
     labels:
-      cloudflare.tunnel.enable: "true"
-      cloudflare.tunnel.hostname: "app.customdomain.com"
-      cloudflare.tunnel.service: "http://my-service:80"
-      cloudflare.tunnel.zonename: "customdomain.com"
+      cloudflare.tunnel.0.enable: "true"
+      cloudflare.tunnel.0.hostname: "app.customdomain.com"
+      cloudflare.tunnel.0.service: "http://my-service:80"
+      cloudflare.tunnel.0.zonename: "customdomain.com"  # Explicitly defines the zone
 ```
+
+#### 3. Wildcard Domain Support
+
+DockFlare supports wildcard domains for routing all subdomains through your tunnel:
+
+```yaml
+services:
+  wildcard-service:
+    image: nginx:latest
+    labels:
+      - "cloudflare.tunnel.enable=true"
+      # Wildcard domain - routes all subdomains
+      - "cloudflare.tunnel.hostname=*.example.com"
+      - "cloudflare.tunnel.service=https://my-service:443"
+      - "cloudflare.tunnel.no_tls_verify=true"
+    networks:
+      - cloudflare-net
+```
+
+This configuration will route all subdomains of example.com through your tunnel to the specified service. This is useful for:
+- Multi-tenant applications where each tenant gets their own subdomain
+- Development environments with dynamic subdomains
+- Catch-all routing for a domain
+
+> **Note**: Specific subdomain rules take precedence over wildcard rules. For example, if you have both `*.example.com` and `specific.example.com` configured, requests to `specific.example.com` will be routed according to its specific rule.
 
 ### Performance Tuning
 
