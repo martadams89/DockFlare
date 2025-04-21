@@ -1834,20 +1834,61 @@ def force_delete_rule(hostname):
 
 @app.route('/stream-logs')
 def stream_logs():
-    """Streams log messages using Server-Sent Events."""
-    @stream_with_context
+    """Streams log messages using Server-Sent Events with proper WSGI compatibility."""
+    client_id = f"client-{random.randint(1000, 9999)}"
+    logging.info(f"Log stream client {client_id} connected.")
+    
     def event_stream():
-        logging.info("Log stream client connected.")
-        yield f"data: --- Log stream connected ---\n\n"
+        """Generate events without accessing Flask request context."""
         try:
+            # Send initial connection message
+            yield f"data: --- Log stream connected (client {client_id}) ---\n\n"
+            yield f"data: heartbeat\n\n"
+            
+            # Track last heartbeat time
+            last_heartbeat = time.time()
+            heartbeat_interval = 2  # Send heartbeats every 2 seconds
+            
+            # Loop continuously to stream logs
             while True:
-                log_entry = log_queue.get(block=True)
-                yield f"data: {log_entry}\n\n"
+                try:
+                    # Check if we need to send a heartbeat
+                    current_time = time.time()
+                    if current_time - last_heartbeat > heartbeat_interval:
+                        yield f"data: heartbeat\n\n"
+                        last_heartbeat = current_time
+                        continue
+                    
+                    # Try to get a log entry with a short timeout
+                    log_entry = log_queue.get(timeout=0.25)
+                    yield f"data: {log_entry}\n\n"
+                except queue.Empty:
+                    # No log entries, send a keepalive comment
+                    yield f": keepalive\n\n"
+                    time.sleep(0.1)
+        
         except GeneratorExit:
-            logging.info("Log stream client disconnected.")
+            logging.info(f"Log stream client {client_id} disconnected.")
+        except Exception as e:
+            logging.error(f"Error in log stream for {client_id}: {e}", exc_info=True)
         finally:
-            pass
-    return Response(event_stream(), mimetype='text/event-stream')
+            logging.info(f"Log stream for client {client_id} ended.")
+    
+    # Create response with proper headers that are WSGI-compatible
+    response = Response(event_stream(), mimetype='text/event-stream')
+    
+    # Set cache control headers that are WSGI-compatible
+    # Note: 'Connection: keep-alive' is removed as it's a hop-by-hop header not allowed in WSGI
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    response.headers['X-Accel-Buffering'] = 'no'
+    
+    # CORS headers are fine (they're end-to-end)
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET'
+    
+    return response
 
 @app.route('/cloudflare-ping')
 def cloudflare_ping():
