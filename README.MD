@@ -19,6 +19,7 @@ DockFlare automates Cloudflare Tunnel ingress rule management based on Docker co
 - **Dynamic Ingress via Docker Labels**:
   - Monitors Docker events for containers with labels (prefix: `cloudflare.tunnel.`): `enable="true"`, `hostname="subdomain.example.com"`, `service="http://target:port"`.
   - Automatically updates Cloudflare Tunnel configuration to match running, labeled containers.
+- **Multi-Domain Support**: Configure multiple domains for a single container using indexed labels, each with its own service target and zone configuration.
 - **Graceful Deletion**: Configurable grace period before removing ingress rules when a container stops.
 - **State Persistence**: Saves `managed_rules` to `state.json` for restarts.
 - **Reconciliation**: On startup, ensures consistency between Docker containers, saved state, and Cloudflare configuration.
@@ -111,7 +112,11 @@ DockFlare listens for Docker container events and manages Cloudflare Tunnel ingr
 
 ### Labeling Containers
 
-To expose a service through DockFlare, add the following labels to your container:
+DockFlare supports two approaches for labeling containers:
+
+#### 1. Standard Labels (Single Domain)
+
+To expose a single service through DockFlare, add the following labels to your container:
 
 ```yaml
 services:
@@ -135,6 +140,46 @@ services:
     networks:
       - cloudflare-net  # Must be in a network that DockFlare can reach
 ```
+
+#### 2. Indexed Labels (Multiple Domains)
+
+To expose multiple domains from a single container, use indexed labels to define each configuration:
+
+```yaml
+services:
+  multi-domain-service:
+    image: nginx:latest
+    labels:
+      # Enable DockFlare for this container
+      - "cloudflare.tunnel.enable=true"
+      
+      # First hostname (using indexed notation)
+      - "cloudflare.tunnel.0.hostname=my-service.example.com"
+      - "cloudflare.tunnel.0.service=http://my-service:80"
+      - "cloudflare.tunnel.0.no_tls_verify=true"
+      
+      # Second hostname (using indexed notation)
+      - "cloudflare.tunnel.1.hostname=my-service2.example.com"
+      - "cloudflare.tunnel.1.service=http://my-service:80"
+      - "cloudflare.tunnel.1.no_tls_verify=true"
+      
+      # Third hostname with a different zone
+      - "cloudflare.tunnel.2.hostname=my-service.otherdomain.com"
+      - "cloudflare.tunnel.2.service=http://my-service:80"
+      - "cloudflare.tunnel.2.no_tls_verify=true"
+      - "cloudflare.tunnel.2.zonename=otherdomain.com"
+    networks:
+      - cloudflare-net
+```
+
+With indexed labels, each domain can have:
+
+Different target services (useful for exposing different ports or paths)
+Different TLS verification settings
+Different zone names for multi-domain management
+This feature works with both internal and external cloudflared modes, making it perfect for services that need to be accessible across multiple domains or subdomains.
+
+> **Note**: Index numbers must be sequential starting from 0 (0, 1, 2, etc.). Any gap in the sequence will cause DockFlare to stop processing further indices.
 
 ### Finding Your Tunnel ID
 

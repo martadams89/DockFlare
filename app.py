@@ -674,125 +674,183 @@ def process_container_start(container):
 
         labels = container.labels
         enabled_label = f"{LABEL_PREFIX}.enable"
-        hostname_label = f"{LABEL_PREFIX}.hostname"
-        service_label = f"{LABEL_PREFIX}.service"
-        zone_name_label = f"{LABEL_PREFIX}.zonename"
-        no_tls_verify_label = f"{LABEL_PREFIX}.no_tls_verify"
 
         is_enabled = labels.get(enabled_label, "false").lower() in ["true", "1", "t", "yes"]
-        hostname = labels.get(hostname_label)
-        service = labels.get(service_label)
-        zone_name = labels.get(zone_name_label)
-        no_tls_verify = labels.get(no_tls_verify_label, "false").lower() in ["true", "1", "t", "yes"]
-
         if not is_enabled:
             logging.debug(f"Ignoring start: {container_name} ({container_id[:12]}): '{enabled_label}' not true.")
             return
-        if not hostname or not service:
-            logging.warning(f"Ignoring start: {container_name} ({container_id[:12]}): Missing '{hostname_label}' or '{service_label}'.")
+
+        # Look for both indexed and non-indexed hostname patterns
+        hostnames_to_process = []
+        
+        # First, check for any direct labels (non-indexed format)
+        hostname = labels.get(f"{LABEL_PREFIX}.hostname")
+        service = labels.get(f"{LABEL_PREFIX}.service") 
+        zone_name = labels.get(f"{LABEL_PREFIX}.zonename")
+        no_tls_verify = labels.get(f"{LABEL_PREFIX}.no_tls_verify", "false").lower() in ["true", "1", "t", "yes"]
+        
+        if hostname and service:
+            if is_valid_hostname(hostname) and is_valid_service(service):
+                hostnames_to_process.append({
+                    "hostname": hostname,
+                    "service": service,
+                    "zone_name": zone_name,
+                    "no_tls_verify": no_tls_verify
+                })
+            else:
+                logging.warning(f"Ignoring invalid direct label pair for {container_name}: Invalid hostname '{hostname}' or service '{service}'")
+        
+        # Then check for indexed labels (cloudflare.tunnel.0.hostname, etc.)
+        index = 0
+        while True:
+            prefix = f"{LABEL_PREFIX}.{index}"
+            hostname = labels.get(f"{prefix}.hostname")
+            if not hostname:
+                # No more indexed hostnames found
+                break
+                
+            service = labels.get(f"{prefix}.service")
+            if not service:
+                # Use the default service if available, otherwise warning and skip
+                service = labels.get(f"{LABEL_PREFIX}.service")
+                if not service:
+                    logging.warning(f"Ignoring indexed hostname {hostname} for {container_name}: Missing service for index {index}")
+                    index += 1
+                    continue
+            
+            zone_name = labels.get(f"{prefix}.zonename", labels.get(f"{LABEL_PREFIX}.zonename"))
+            no_tls_verify_value = labels.get(f"{prefix}.no_tls_verify", labels.get(f"{LABEL_PREFIX}.no_tls_verify", "false"))
+            no_tls_verify = no_tls_verify_value.lower() in ["true", "1", "t", "yes"]
+            
+            if is_valid_hostname(hostname) and is_valid_service(service):
+                hostnames_to_process.append({
+                    "hostname": hostname,
+                    "service": service,
+                    "zone_name": zone_name,
+                    "no_tls_verify": no_tls_verify
+                })
+            else:
+                logging.warning(f"Ignoring invalid indexed label pair for {container_name}: Invalid hostname '{hostname}' or service '{service}'")
+            
+            index += 1
+        
+        if not hostnames_to_process:
+            logging.warning(f"No valid hostname configurations found for {container_name} ({container_id[:12]})")
             return
-
-        if not is_valid_hostname(hostname):
-            logging.warning(f"Ignoring start: {container_name} ({container_id[:12]}): Invalid hostname format '{hostname}'.")
-            return
-        if not is_valid_service(service):
-            logging.warning(f"Ignoring start: {container_name} ({container_id[:12]}): Invalid service format '{service}'. Needs protocol (http/https/tcp/unix) or host:port.")
-            return
-
-        target_zone_id = None
-        if zone_name:
-            logging.info(f"Container {container_name} specified zone name: '{zone_name}'. Looking up ID.")
-            target_zone_id = get_zone_id_from_name(zone_name)
-            if not target_zone_id:
-                logging.error(f"Failed to find Zone ID for specified name '{zone_name}' for container {container_name}. Cannot manage DNS for {hostname}.")
-                return
-        else:
-            logging.debug(f"Container {container_name} did not specify zone name. Using default Zone ID if available.")
-            target_zone_id = CF_ZONE_ID
-
-        if not target_zone_id:
-            logging.error(f"Cannot manage DNS for {hostname} (container {container_name}): No valid Zone ID found (label lookup failed and no default CF_ZONE_ID set?).")
-            return
-
-        logging.info(f"Managing {hostname} (from {container_name}) in Zone ID: {target_zone_id}")
-
-        needs_cf_update = False
+            
+        logging.info(f"Found {len(hostnames_to_process)} hostname configurations for container {container_name}")
+        
+        # Process each hostname configuration
         state_changed_locally = False
-        with state_lock:
-            existing_rule = managed_rules.get(hostname)
-            if existing_rule:
-                zone_id_changed = existing_rule.get("zone_id") != target_zone_id
+        needs_cf_update = False
+        
+        for config in hostnames_to_process:
+            hostname = config["hostname"]
+            service = config["service"]
+            zone_name = config["zone_name"]
+            no_tls_verify = config["no_tls_verify"]
+            
+            target_zone_id = None
+            if zone_name:
+                logging.info(f"Hostname {hostname} specified zone name: '{zone_name}'. Looking up ID.")
+                target_zone_id = get_zone_id_from_name(zone_name)
+                if not target_zone_id:
+                    logging.error(f"Failed to find Zone ID for specified name '{zone_name}' for hostname {hostname}. Skipping.")
+                    continue
+            else:
+                logging.debug(f"Hostname {hostname} did not specify zone name. Using default Zone ID if available.")
+                target_zone_id = CF_ZONE_ID
 
-                if existing_rule.get("status") == "pending_deletion":
-                    logging.info(f"Rule for {hostname} was pending deletion. Reactivating.")
-                    existing_rule["status"] = "active"
-                    existing_rule["delete_at"] = None
-                    existing_rule["service"] = service
-                    existing_rule["container_id"] = container_id
-                    existing_rule["zone_id"] = target_zone_id
-                    existing_rule["no_tls_verify"] = no_tls_verify
-                    state_changed_locally = True
-                    needs_cf_update = True
-                    if zone_id_changed:
-                        logging.info(f"Zone ID for reactivated rule {hostname} updated to {target_zone_id}.")
-                elif existing_rule.get("status") == "active":
-                    service_changed = existing_rule.get("service") != service
-                    container_changed = existing_rule.get("container_id") != container_id
-                    no_tls_verify_changed = existing_rule.get("no_tls_verify") != no_tls_verify
+            if not target_zone_id:
+                logging.error(f"Cannot manage DNS for {hostname}: No valid Zone ID found (label lookup failed and no default CF_ZONE_ID set?). Skipping.")
+                continue
+                
+            logging.info(f"Managing {hostname} (from {container_name}) in Zone ID: {target_zone_id}")
+            
+            with state_lock:
+                existing_rule = managed_rules.get(hostname)
+                if existing_rule:
+                    zone_id_changed = existing_rule.get("zone_id") != target_zone_id
 
-                    if container_changed:
-                        logging.info(f"Updating container ID for active rule {hostname}: '{existing_rule.get('container_id')[:12]}' -> '{container_id[:12]}'.")
-                        existing_rule["container_id"] = container_id
-                        state_changed_locally = True
-                    if service_changed:
-                        logging.info(f"Updating service for active rule {hostname}: '{existing_rule.get('service')}' -> '{service}'.")
+                    if existing_rule.get("status") == "pending_deletion":
+                        logging.info(f"Rule for {hostname} was pending deletion. Reactivating.")
+                        existing_rule["status"] = "active"
+                        existing_rule["delete_at"] = None
                         existing_rule["service"] = service
-                        state_changed_locally = True
-                        needs_cf_update = True
-                    if no_tls_verify_changed:
-                        logging.info(f"Updating noTLSVerify for active rule {hostname}: '{existing_rule.get('no_tls_verify')}' -> '{no_tls_verify}'.")
+                        existing_rule["container_id"] = container_id
+                        existing_rule["zone_id"] = target_zone_id
                         existing_rule["no_tls_verify"] = no_tls_verify
                         state_changed_locally = True
                         needs_cf_update = True
-                    if zone_id_changed:
-                        logging.warning(f"Zone ID for active rule {hostname} changed ('{existing_rule.get('zone_id')}' -> '{target_zone_id}'). DNS in old zone may be stale if cleanup failed.")
-                        existing_rule["zone_id"] = target_zone_id
-                        state_changed_locally = True
-                        needs_cf_update = True
-            else:
-                logging.info(f"Adding new active rule for hostname: {hostname}")
-                managed_rules[hostname] = {
-                    "service": service,
-                    "container_id": container_id,
-                    "status": "active",
-                    "delete_at": None,
-                    "zone_id": target_zone_id,
-                    "no_tls_verify": no_tls_verify
-                }
-                state_changed_locally = True
-                needs_cf_update = True
+                        if zone_id_changed:
+                            logging.info(f"Zone ID for reactivated rule {hostname} updated to {target_zone_id}.")
+                    elif existing_rule.get("status") == "active":
+                        service_changed = existing_rule.get("service") != service
+                        container_changed = existing_rule.get("container_id") != container_id
+                        no_tls_verify_changed = existing_rule.get("no_tls_verify") != no_tls_verify
 
-            if state_changed_locally:
-                logging.debug(f"Saving state after processing start for {hostname}.")
-                save_state()
+                        if container_changed:
+                            logging.info(f"Updating container ID for active rule {hostname}: '{existing_rule.get('container_id')[:12]}' -> '{container_id[:12]}'.")
+                            existing_rule["container_id"] = container_id
+                            state_changed_locally = True
+                        if service_changed:
+                            logging.info(f"Updating service for active rule {hostname}: '{existing_rule.get('service')}' -> '{service}'.")
+                            existing_rule["service"] = service
+                            state_changed_locally = True
+                            needs_cf_update = True
+                        if no_tls_verify_changed:
+                            logging.info(f"Updating noTLSVerify for active rule {hostname}: '{existing_rule.get('no_tls_verify')}' -> '{no_tls_verify}'.")
+                            existing_rule["no_tls_verify"] = no_tls_verify
+                            state_changed_locally = True
+                            needs_cf_update = True
+                        if zone_id_changed:
+                            logging.warning(f"Zone ID for active rule {hostname} changed ('{existing_rule.get('zone_id')}' -> '{target_zone_id}'). DNS in old zone may be stale if cleanup failed.")
+                            existing_rule["zone_id"] = target_zone_id
+                            state_changed_locally = True
+                            needs_cf_update = True
+                else:
+                    logging.info(f"Adding new active rule for hostname: {hostname}")
+                    managed_rules[hostname] = {
+                        "service": service,
+                        "container_id": container_id,
+                        "status": "active",
+                        "delete_at": None,
+                        "zone_id": target_zone_id,
+                        "no_tls_verify": no_tls_verify
+                    }
+                    state_changed_locally = True
+                    needs_cf_update = True
+
+        if state_changed_locally:
+            logging.debug(f"Saving state after processing start for container {container_name}.")
+            save_state()
 
         if needs_cf_update:
-            logging.info(f"Triggering Cloudflare config update due to change for {hostname}.")
+            logging.info(f"Triggering Cloudflare config update due to changes for container {container_name}.")
             if update_cloudflare_config():
-                logging.info(f"Tunnel config update successful for {hostname}.")
+                logging.info(f"Tunnel config update successful for container {container_name}.")
                 if tunnel_state.get("id"):
-                    dns_record_id = create_cloudflare_dns_record(target_zone_id, hostname, tunnel_state["id"])
-                    if dns_record_id:
-                        logging.info(f"DNS record management in zone {target_zone_id} successful for {hostname}.")
-                    else:
-                        logging.error(f"CRITICAL: Tunnel config updated for {hostname} but failed to create/verify DNS record in zone {target_zone_id}!")
-                        cloudflared_agent_state["last_action_status"] = f"Error: Failed creating DNS for {hostname} in zone {target_zone_id}."
+                    # Set up DNS records for each hostname
+                    for config in hostnames_to_process:
+                        hostname = config["hostname"]
+                        zone_name = config["zone_name"]
+                        
+                        # Find the zone ID (either from zone_name or default)
+                        target_zone_id = get_zone_id_from_name(zone_name) if zone_name else CF_ZONE_ID
+                        
+                        if target_zone_id:
+                            dns_record_id = create_cloudflare_dns_record(target_zone_id, hostname, tunnel_state["id"])
+                            if dns_record_id:
+                                logging.info(f"DNS record management in zone {target_zone_id} successful for {hostname}.")
+                            else:
+                                logging.error(f"CRITICAL: Tunnel config updated for {hostname} but failed to create/verify DNS record in zone {target_zone_id}!")
+                                cloudflared_agent_state["last_action_status"] = f"Error: Failed creating DNS for {hostname} in zone {target_zone_id}."
+                        else:
+                            logging.error(f"Missing Zone ID - cannot manage DNS record for {hostname}.")
                 else:
-                    logging.error("Missing Tunnel ID - cannot manage DNS record for {hostname}.")
+                    logging.error(f"Missing Tunnel ID - cannot manage DNS records for container {container_name}.")
             else:
-                logging.error(f"Failed to update Cloudflare tunnel config after processing start for {hostname}. DNS record not managed.")
-        elif state_changed_locally:
-            logging.debug(f"Local state updated for {hostname} (e.g., container ID), no Cloudflare config change needed.")
+                logging.error(f"Failed to update Cloudflare tunnel config after processing start for container {container_name}. DNS records not managed.")
 
     except NotFound:
         logging.warning(f"Container {container_name} ({container_id[:12] if container_id else 'Unknown'}) not found during start processing.")
@@ -1013,39 +1071,88 @@ def reconcile_state():
     try:
         running_labeled_containers = {}
         try:
-             containers = docker_client.containers.list(sparse=False, all=SCAN_ALL_NETWORKS)
-             logging.debug(f"[Reconcile] Found {len(containers)} running containers.")
-             for c in containers:
-                 try:
-                     labels = c.labels
-                     container_id = c.id
-                     container_name = c.name
-                     enabled = labels.get(f"{LABEL_PREFIX}.enable", "false").lower() in ["true", "1", "t", "yes"]
-                     hostname = labels.get(f"{LABEL_PREFIX}.hostname")
-                     service = labels.get(f"{LABEL_PREFIX}.service")
-                     zone_name = labels.get(f"{LABEL_PREFIX}.zonename")
-                     no_tls_verify = labels.get(f"{LABEL_PREFIX}.no_tls_verify", "false").lower() in ["true", "1", "t", "yes"]
-
-                     if enabled and hostname and service:
-                         if not is_valid_hostname(hostname): continue
-                         if not is_valid_service(service): continue
-
-                         if hostname in running_labeled_containers:
-                              logging.warning(f"[Reconcile] Duplicate hostname label '{hostname}' found on running containers: {container_name} and {running_labeled_containers[hostname]['container_name']}. Using latest found: {container_name}.")
-                         running_labeled_containers[hostname] = {
-                             "service": service,
-                             "container_id": container_id,
-                             "container_name": container_name,
-                             "zone_name": zone_name,
-                             "no_tls_verify": no_tls_verify
-                         }
-                 except (NotFound, APIError) as e:
-                      logging.warning(f"[Reconcile] Docker error processing container {c.id[:12]}: {e}. Skipping this container.");
-                      continue
-             logging.info(f"[Reconcile] Found {len(running_labeled_containers)} running containers with valid Dockflare labels.")
+            containers = docker_client.containers.list(sparse=False, all=SCAN_ALL_NETWORKS)
+            logging.debug(f"[Reconcile] Found {len(containers)} running containers.")
+            for c in containers:
+                try:
+                    labels = c.labels
+                    container_id = c.id
+                    container_name = c.name
+                    enabled = labels.get(f"{LABEL_PREFIX}.enable", "false").lower() in ["true", "1", "t", "yes"]
+                    
+                    if not enabled:
+                        continue
+                        
+                    # Process both direct and indexed hostname configurations
+                    hostname_configs = []
+                    
+                    # First check for direct hostname labels
+                    hostname = labels.get(f"{LABEL_PREFIX}.hostname")
+                    service = labels.get(f"{LABEL_PREFIX}.service")
+                    zone_name = labels.get(f"{LABEL_PREFIX}.zonename")
+                    no_tls_verify = labels.get(f"{LABEL_PREFIX}.no_tls_verify", "false").lower() in ["true", "1", "t", "yes"]
+                    
+                    if hostname and service:
+                        if is_valid_hostname(hostname) and is_valid_service(service):
+                            hostname_configs.append({
+                                "hostname": hostname,
+                                "service": service,
+                                "zone_name": zone_name,
+                                "no_tls_verify": no_tls_verify
+                            })
+                    
+                    # Then check for indexed labels
+                    index = 0
+                    while True:
+                        prefix = f"{LABEL_PREFIX}.{index}"
+                        indexed_hostname = labels.get(f"{prefix}.hostname")
+                        if not indexed_hostname:
+                            # No more indexed hostnames
+                            break
+                            
+                        indexed_service = labels.get(f"{prefix}.service", service)  # Fall back to default service
+                        if not indexed_service:
+                            # Skip this entry if no service available
+                            index += 1
+                            continue
+                            
+                        indexed_zone_name = labels.get(f"{prefix}.zonename", zone_name)
+                        indexed_no_tls_verify_value = labels.get(f"{prefix}.no_tls_verify", 
+                                                             labels.get(f"{LABEL_PREFIX}.no_tls_verify", "false"))
+                        indexed_no_tls_verify = indexed_no_tls_verify_value.lower() in ["true", "1", "t", "yes"]
+                        
+                        if is_valid_hostname(indexed_hostname) and is_valid_service(indexed_service):
+                            hostname_configs.append({
+                                "hostname": indexed_hostname,
+                                "service": indexed_service,
+                                "zone_name": indexed_zone_name,
+                                "no_tls_verify": indexed_no_tls_verify
+                            })
+                        
+                        index += 1
+                    
+                    # Add all valid configs to running containers map
+                    for config in hostname_configs:
+                        hostname = config["hostname"]
+                        if hostname in running_labeled_containers:
+                            logging.warning(f"[Reconcile] Duplicate hostname '{hostname}' found on running containers: {container_name} and {running_labeled_containers[hostname]['container_name']}. Using latest found: {container_name}.")
+                        
+                        running_labeled_containers[hostname] = {
+                            "service": config["service"],
+                            "container_id": container_id,
+                            "container_name": container_name,
+                            "zone_name": config["zone_name"],
+                            "no_tls_verify": config["no_tls_verify"]
+                        }
+                        
+                except (NotFound, APIError) as e:
+                    logging.warning(f"[Reconcile] Docker error processing container {c.id[:12]}: {e}. Skipping this container.");
+                    continue
+            
+            logging.info(f"[Reconcile] Found {len(running_labeled_containers)} running hostnames with valid DockFlare labels.")
         except (APIError, requests.exceptions.ConnectionError) as e:
-             logging.error(f"[Reconcile] Docker error listing containers: {e}. Aborting reconciliation.");
-             return
+            logging.error(f"[Reconcile] Docker error listing containers: {e}. Aborting reconciliation.");
+            return
 
         with state_lock:
             logging.debug("[Reconcile] Acquired state lock for comparison.")
