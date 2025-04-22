@@ -32,6 +32,8 @@ DockFlare automates Cloudflare Tunnel ingress rule management based on Docker co
 - **Real-time Log Streaming**: View logs in real-time using Server-Sent Events (SSE).
 - **Content Security Policy (CSP)**: Ensures secure loading of resources and compatibility with reverse proxies.
 
+[Learn more on the GitHub Wiki](https://github.com/ChrispyBacon-dev/DockFlare/wiki)
+
 ![Web ui example](images/status_web.png)
 ## How It Works
 
