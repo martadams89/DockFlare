@@ -420,4 +420,4 @@ Contributions are welcome! Please open an issue or submit a pull request on GitH
 
 ## License
 
-DockFlare is licensed under the MIT License. See `LICENSE.MD` for details.
+DockFlare is licensed under the GNU General Public License version 3 License. See `LICENSE.MD` for details.
