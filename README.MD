@@ -245,7 +245,7 @@ If you want to switch from using DockFlare's built-in cloudflared container to a
    ```bash
    docker start dockflare
    # Or if you removed the volume, you may need to recreate the container
-   docker-compose up -d
+   docker compose up -d
    ```
 
 9. **Verify container discovery** after restart:
