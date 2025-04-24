@@ -1,9 +1,8 @@
-# DockFlare: Cloudflare Tunnel Ingress Controller
-
+![DockFlareBanner](images/bannertr.png)
 [![Maintenance](https://img.shields.io/badge/Maintained%3F-yes-green.svg)](https://github.com/ChrispyBacon-dev/baconflip)
 [![OS](https://img.shields.io/badge/os-linux%20%7C%20windows%20%7C%20macos-brightgreen)]()
 [![CPU Architectures](https://img.shields.io/badge/CPU-x86_64%20%7C%20arm64-brightgreen)](https://en.wikipedia.org/wiki/Central_processing_unit)
-[![Generic badge](https://img.shields.io/badge/Status-Alpha-yellow.svg)](https://shields.io/)
+[![Generic badge](https://img.shields.io/badge/Status-Beta-yellow.svg)](https://shields.io/)
 [![Docker Pulls](https://img.shields.io/docker/pulls/alplat/dockflare)](https://hub.docker.com/r/alplat/dockflare)
 [![made-with-python](https://img.shields.io/badge/Made%20with-Python-1f425f.svg)](https://www.python.org/)
 [![GitHub issues](https://img.shields.io/github/issues/ChrispyBacon-dev/dockflare)](https://github.com/ChrispyBacon-dev/dockflare/issues)
@@ -19,15 +18,21 @@ DockFlare automates Cloudflare Tunnel ingress rule management based on Docker co
 - **Dynamic Ingress via Docker Labels**:
   - Monitors Docker events for containers with labels (prefix: `cloudflare.tunnel.`): `enable="true"`, `hostname="subdomain.example.com"`, `service="http://target:port"`.
   - Automatically updates Cloudflare Tunnel configuration to match running, labeled containers.
+- **Multi-Domain Support**: Configure multiple domains for a single container using indexed labels, each with its own service target and zone configuration.
 - **Graceful Deletion**: Configurable grace period before removing ingress rules when a container stops.
 - **State Persistence**: Saves `managed_rules` to `state.json` for restarts.
-- **Reconciliation**: On startup, ensures consistency between Docker containers, saved state, and Cloudflare configuration.
+- **Optimized Reconciliation**: 
+  - On startup, ensures consistency between Docker containers, saved state, and Cloudflare configuration
+  - Processes DNS operations in small batches to prevent API rate limiting
+  - Shows real-time reconciliation progress in the UI
 - **Web UI**: Status dashboard with:
   - Tunnel & agent status.
   - Start/Stop agent controls.
   - Managed ingress rule list with status, container ID, deletion time, and "Force Delete" option.
 - **Real-time Log Streaming**: View logs in real-time using Server-Sent Events (SSE).
 - **Content Security Policy (CSP)**: Ensures secure loading of resources and compatibility with reverse proxies.
+
+[Learn more on the GitHub Wiki](https://github.com/ChrispyBacon-dev/DockFlare/wiki)
 
 ![Web ui example](images/status_web.png)
 ## How It Works
@@ -111,7 +116,11 @@ DockFlare listens for Docker container events and manages Cloudflare Tunnel ingr
 
 ### Labeling Containers
 
-To expose a service through DockFlare, add the following labels to your container:
+DockFlare supports two approaches for labeling containers:
+
+#### 1. Standard Labels (Single Domain)
+
+To expose a single service through DockFlare, add the following labels to your container:
 
 ```yaml
 services:
@@ -135,6 +144,46 @@ services:
     networks:
       - cloudflare-net  # Must be in a network that DockFlare can reach
 ```
+
+#### 2. Indexed Labels (Multiple Domains)
+
+To expose multiple domains from a single container, use indexed labels to define each configuration:
+
+```yaml
+services:
+  multi-domain-service:
+    image: nginx:latest
+    labels:
+      # Enable DockFlare for this container
+      - "cloudflare.tunnel.enable=true"
+      
+      # First hostname (using indexed notation)
+      - "cloudflare.tunnel.0.hostname=my-service.example.com"
+      - "cloudflare.tunnel.0.service=http://my-service:80"
+      - "cloudflare.tunnel.0.no_tls_verify=true"
+      
+      # Second hostname (using indexed notation)
+      - "cloudflare.tunnel.1.hostname=my-service2.example.com"
+      - "cloudflare.tunnel.1.service=http://my-service:80"
+      - "cloudflare.tunnel.1.no_tls_verify=true"
+      
+      # Third hostname with a different zone
+      - "cloudflare.tunnel.2.hostname=my-service.otherdomain.com"
+      - "cloudflare.tunnel.2.service=http://my-service:80"
+      - "cloudflare.tunnel.2.no_tls_verify=true"
+      - "cloudflare.tunnel.2.zonename=otherdomain.com"
+    networks:
+      - cloudflare-net
+```
+
+With indexed labels, each domain can have:
+
+Different target services (useful for exposing different ports or paths)
+Different TLS verification settings
+Different zone names for multi-domain management
+This feature works with both internal and external cloudflared modes, making it perfect for services that need to be accessible across multiple domains or subdomains.
+
+> **Note**: Index numbers must be sequential starting from 0 (0, 1, 2, etc.). Any gap in the sequence will cause DockFlare to stop processing further indices.
 
 ### Finding Your Tunnel ID
 
@@ -197,7 +246,7 @@ If you want to switch from using DockFlare's built-in cloudflared container to a
    ```bash
    docker start dockflare
    # Or if you removed the volume, you may need to recreate the container
-   docker-compose up -d
+   docker compose up -d
    ```
 
 9. **Verify container discovery** after restart:
@@ -223,8 +272,8 @@ After the switch, DockFlare will:
 |----------|-------------|---------|
 | `CF_API_TOKEN` | Cloudflare API token | (Required) |
 | `CF_ACCOUNT_ID` | Cloudflare account ID | (Required) |
-| `CF_ZONE_ID` | Default Cloudflare zone ID | (Required unless using `zonename` label) |
-| `TUNNEL_NAME` | Name for the Cloudflare tunnel | (Required unless using external tunnel) |
+| `CF_ZONE_ID` | Default/fallback Cloudflare zone ID | (Required unless all containers use `zonename` label) |
+| `TUNNEL_NAME` | Name for the Cloudflare tunnel | dockflared-tunnel (Required unless using external tunnel) |
 | `GRACE_PERIOD_SECONDS` | Time before removing rules after container stops | 28800 (8 hours) |
 | `CLEANUP_INTERVAL_SECONDS` | Interval for checking expired rules | 300 (5 minutes) |
 | `LABEL_PREFIX` | Prefix for Docker labels | cloudflare.tunnel |
@@ -264,18 +313,73 @@ DockFlare provides real-time logs using Server-Sent Events (SSE). Open the "Real
 
 ### DNS Zone Management
 
-By default, DockFlare uses the `CF_ZONE_ID` specified in your environment variables for all DNS records. However, you can specify different zones for individual containers using the `cloudflare.tunnel.zonename` label. This allows you to expose services across multiple domains.
+DockFlare supports hosting services across multiple Cloudflare zones (domains). There are two ways to specify which zone a hostname belongs to:
+
+1. **Container-specific zone using labels**: Use the `cloudflare.tunnel.zonename` label to specify the zone name for a specific hostname. DockFlare will look up the zone ID automatically.
+
+2. **Default zone using environment variable**: Set the `CF_ZONE_ID` environment variable as a fallback for any hostname that doesn't specify a `zonename` label.
+
+For multi-domain setups, you have two options:
+- **Option 1**: Set `CF_ZONE_ID` to your primary domain's Zone ID, and use `zonename` labels only for hostnames in other zones
+- **Option 2**: Always specify `zonename` labels for all hostnames, making the `CF_ZONE_ID` environment variable optional
+
+> **Note**: When using wildcard domains like `*.example.com`, ensure you're using the correct zone, either via the `zonename` label or the default `CF_ZONE_ID`.
 
 ```yaml
 services:
   my-service:
     # ...other configuration...
     labels:
-      cloudflare.tunnel.enable: "true"
-      cloudflare.tunnel.hostname: "app.customdomain.com"
-      cloudflare.tunnel.service: "http://my-service:80"
-      cloudflare.tunnel.zonename: "customdomain.com"
+      cloudflare.tunnel.0.enable: "true"
+      cloudflare.tunnel.0.hostname: "app.customdomain.com"
+      cloudflare.tunnel.0.service: "http://my-service:80"
+      cloudflare.tunnel.0.zonename: "customdomain.com"  # Explicitly defines the zone
 ```
+
+#### 3. Wildcard Domain Support
+
+DockFlare supports wildcard domains for routing all subdomains through your tunnel:
+
+```yaml
+services:
+  wildcard-service:
+    image: nginx:latest
+    labels:
+      - "cloudflare.tunnel.enable=true"
+      # Wildcard domain - routes all subdomains
+      - "cloudflare.tunnel.hostname=*.example.com"
+      - "cloudflare.tunnel.service=https://my-service:443"
+      - "cloudflare.tunnel.no_tls_verify=true"
+    networks:
+      - cloudflare-net
+```
+
+This configuration will route all subdomains of example.com through your tunnel to the specified service. This is useful for:
+- Multi-tenant applications where each tenant gets their own subdomain
+- Development environments with dynamic subdomains
+- Catch-all routing for a domain
+
+> **Note**: Specific subdomain rules take precedence over wildcard rules. For example, if you have both `*.example.com` and `specific.example.com` configured, requests to `specific.example.com` will be routed according to its specific rule.
+
+### Performance Tuning
+
+DockFlare includes several features to optimize performance and prevent rate limiting:
+
+1. **Concurrent DNS Operation Limiting**: 
+   - Controls how many simultaneous DNS operations can run
+   - Prevents Cloudflare API rate limiting during large reconciliations
+   - Configurable via `MAX_CONCURRENT_DNS_OPS` (default: 3)
+
+2. **Batched DNS Processing**:
+   - Processes DNS records in small batches during reconciliation
+   - Shows real-time progress feedback in the web UI
+   - Configurable via `RECONCILIATION_BATCH_SIZE` (default: 3)
+
+3. **Asynchronous Initialization**:
+   - Web UI is immediately available while initialization continues
+   - Progress indicators show current status of initialization and reconciliation
+
+These optimizations are particularly helpful when managing tunnels with many domains or when running on systems with limited resources.
 
 ## Troubleshooting
 
@@ -318,4 +422,4 @@ Contributions are welcome! Please open an issue or submit a pull request on GitH
 
 ## License
 
-DockFlare is licensed under the MIT License. See `LICENSE.MD` for details.
+DockFlare is licensed under the GNU General Public License version 3 License. See [LICENSE.MD](https://github.com/ChrispyBacon-dev/DockFlare?tab=License-1-ov-file) for details.
